@@ -22,15 +22,19 @@ func StartSession(c *gin.Context) {
 		return
 	}
 
+	// Stop any existing active session in this room
 	db.Pool.Exec(context.Background(),
 		`UPDATE attendance_sessions SET active = false, end_time = NOW()
 		 WHERE room_id = $1 AND active = true`, req.RoomID)
 
+	// Session lasts 1 hour by default
+	endTime := time.Now().Add(1 * time.Hour)
+
 	var sessionID string
 	err := db.Pool.QueryRow(context.Background(),
-		`INSERT INTO attendance_sessions (room_id, professor_id, subject)
-		 VALUES ($1, $2, $3) RETURNING id`,
-		req.RoomID, professorID, req.Subject,
+		`INSERT INTO attendance_sessions (room_id, professor_id, subject, active, end_time)
+		 VALUES ($1, $2, $3, true, $4) RETURNING id`,
+		req.RoomID, professorID, req.Subject, endTime,
 	).Scan(&sessionID)
 
 	if err != nil {
@@ -38,22 +42,14 @@ func StartSession(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"session_id": sessionID, "message": "attendance session started"})
+	c.JSON(http.StatusCreated, gin.H{
+		"session_id": sessionID,
+		"end_time":   endTime.Format(time.RFC3339),
+		"message":    "attendance session started",
+	})
 }
 
-// POST /sessions/:session_id/stop
-func StopSession(c *gin.Context) {
-	sessionID := c.Param("session_id")
-	_, err := db.Pool.Exec(context.Background(),
-		`UPDATE attendance_sessions SET active = false, end_time = NOW() WHERE id = $1`, sessionID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to stop session"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "session stopped"})
-}
-
-// GET /sessions/active?room_id=ROOM101
+// GET /sessions/active?year=2nd Year
 func GetActiveSession(c *gin.Context) {
 	year := c.Query("year")
 	if year == "" {
@@ -64,7 +60,7 @@ func GetActiveSession(c *gin.Context) {
 	studentID, _ := c.Get("user_id")
 
 	var sessionID, subject, roomName string
-	var endTime time.Time
+	var endTime *time.Time
 
 	err := db.Pool.QueryRow(context.Background(),
 		`SELECT s.id, s.subject, r.room_name, s.end_time
@@ -80,8 +76,8 @@ func GetActiveSession(c *gin.Context) {
 		return
 	}
 
-	// Auto-expire if past end time
-	if time.Now().After(endTime) {
+	// Auto-expire if past end_time (only when set)
+	if endTime != nil && time.Now().After(*endTime) {
 		db.Pool.Exec(context.Background(),
 			`UPDATE attendance_sessions SET active = false WHERE id = $1`, sessionID)
 		c.JSON(http.StatusOK, gin.H{"active": false})
@@ -97,14 +93,30 @@ func GetActiveSession(c *gin.Context) {
 		)`, sessionID, studentID,
 	).Scan(&alreadyMarked)
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"active":         true,
 		"session_id":     sessionID,
 		"subject":        subject,
 		"room_name":      roomName,
-		"end_time":       endTime.Format(time.RFC3339),
 		"already_marked": alreadyMarked,
-	})
+	}
+	if endTime != nil {
+		resp["end_time"] = endTime.Format(time.RFC3339)
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// POST /sessions/:session_id/stop
+func StopSession(c *gin.Context) {
+	sessionID := c.Param("session_id")
+	_, err := db.Pool.Exec(context.Background(),
+		`UPDATE attendance_sessions SET active = false, end_time = NOW() WHERE id = $1`, sessionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to stop session"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "session stopped"})
 }
 
 // POST /attendance/mark
