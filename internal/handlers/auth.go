@@ -167,3 +167,40 @@ func RegisterBLE(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "BLE UUID registered"})
 }
+
+func RegisterProfessor(c *gin.Context) {
+	var req struct {
+		Name     string `json:"name" binding:"required"`
+		Email    string `json:"email" binding:"required"`
+		Subject  string `json:"subject" binding:"required"`
+		Password string `json:"password" binding:"required,min=8"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		return
+	}
+
+	var id string
+	err = db.Pool.QueryRow(context.Background(),
+		`INSERT INTO professors (name, email, subject, password_hash)
+         VALUES ($1, $2, $3, $4) RETURNING id`,
+		req.Name, req.Email, req.Subject, string(hash),
+	).Scan(&id)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "email may already exist"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"id":    id,
+		"email": req.Email,
+		"name":  req.Name,
+	})
+}

@@ -16,6 +16,7 @@ func Setup(r *gin.Engine) {
 		auth.POST("/register", handlers.RegisterStudent)
 		auth.POST("/login", handlers.LoginStudent)
 		auth.POST("/professor/login", handlers.LoginProfessor)
+		auth.POST("/professor/register", handlers.RegisterProfessor)
 	}
 
 	student := r.Group("/")
@@ -42,8 +43,10 @@ func Setup(r *gin.Engine) {
 		professor.POST("/timetable/copy-week", handlers.CopyWeek)
 		professor.GET("/timetable/week", handlers.GetTimetableWeek)
 		professor.GET("/professor/:id/sessions", handlers.GetProfessorSessions)
+
 	}
 
 	// ESP32 - no auth
 	r.POST("/attendance/ble", handlers.MarkAttendanceBLE)
+
 }
