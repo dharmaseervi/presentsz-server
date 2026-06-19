@@ -122,36 +122,133 @@ func StopSession(c *gin.Context) {
 // POST /attendance/mark
 func MarkAttendance(c *gin.Context) {
 	studentID, _ := c.Get("user_id")
+
 	var req struct {
 		SessionID string `json:"session_id" binding:"required"`
 	}
+
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+		})
 		return
 	}
 
-	var active bool
-	err := db.Pool.QueryRow(context.Background(),
-		`SELECT active FROM attendance_sessions WHERE id = $1`, req.SessionID,
-	).Scan(&active)
-
-	if err != nil || !active {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "session is not active"})
-		return
-	}
-
-	_, err = db.Pool.Exec(context.Background(),
-		`INSERT INTO attendance (session_id, student_id, status)
-		 VALUES ($1, $2, 'present')
-		 ON CONFLICT (session_id, student_id) DO NOTHING`,
-		req.SessionID, studentID,
+	var (
+		active      bool
+		sessionYear string
+		studentYear string
 	)
+
+	// Get session status and year
+	err := db.Pool.QueryRow(
+		context.Background(),
+		`
+		SELECT s.active, c.year
+		FROM attendance_sessions s
+		JOIN classrooms c ON c.id = s.room_id
+		WHERE s.id = $1
+		`,
+		req.SessionID,
+	).Scan(&active, &sessionYear)
+
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to mark attendance"})
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "session not found",
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "attendance marked"})
+	if !active {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "session is not active",
+		})
+		return
+	}
+
+	// Get student year
+	err = db.Pool.QueryRow(
+		context.Background(),
+		`
+		SELECT year
+		FROM students
+		WHERE id = $1
+		`,
+		studentID,
+	).Scan(&studentYear)
+
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "student not found",
+		})
+		return
+	}
+
+	// Verify student belongs to same year
+	if sessionYear != studentYear {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "student not assigned to this class",
+		})
+		return
+	}
+
+	// Prevent duplicate attendance
+	var alreadyMarked bool
+
+	err = db.Pool.QueryRow(
+		context.Background(),
+		`
+		SELECT EXISTS(
+			SELECT 1
+			FROM attendance
+			WHERE session_id = $1
+			AND student_id = $2
+		)
+		`,
+		req.SessionID,
+		studentID,
+	).Scan(&alreadyMarked)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "failed to check attendance",
+		})
+		return
+	}
+
+	if alreadyMarked {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "attendance already marked",
+		})
+		return
+	}
+
+	// Insert attendance
+	_, err = db.Pool.Exec(
+		context.Background(),
+		`
+		INSERT INTO attendance (
+			session_id,
+			student_id,
+			status
+		)
+		VALUES ($1, $2, 'present')
+		`,
+		req.SessionID,
+		studentID,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "failed to mark attendance",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "attendance marked",
+		"session": req.SessionID,
+	})
 }
 
 // POST /attendance/ble  (called by ESP32)
