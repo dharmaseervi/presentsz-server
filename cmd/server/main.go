@@ -74,9 +74,9 @@ func runMigrations() error {
 func runSessionScheduler() {
 	now := time.Now()
 	currentTime := now.Format("15:04")
+	windowStart := now.Add(-2 * time.Minute).Format("15:04")
 	today := now.Format("2006-01-02")
 
-	// Auto-create sessions for timetable entries starting now
 	rows, err := db.Pool.Query(context.Background(),
 		`SELECT t.id, t.subject, t.room_id, t.time_slot,
 			LEAD(t.time_slot) OVER (
@@ -84,8 +84,10 @@ func runSessionScheduler() {
 				ORDER BY t.time_slot
 			) as next_slot
 		 FROM timetable t
-		 WHERE t.class_date = $1 AND t.time_slot = $2`,
-		today, currentTime,
+		 WHERE t.class_date = $1
+		   AND t.time_slot <= $2
+		   AND t.time_slot >= $3`,
+		today, currentTime, windowStart,
 	)
 	if err != nil {
 		log.Println("Scheduler query error:", err)

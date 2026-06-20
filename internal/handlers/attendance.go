@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -120,6 +121,9 @@ func StopSession(c *gin.Context) {
 }
 
 // POST /attendance/mark
+const LATE_THRESHOLD_MINUTES = 15
+
+// POST /attendance/mark
 func MarkAttendance(c *gin.Context) {
 	studentID, _ := c.Get("user_id")
 
@@ -128,9 +132,7 @@ func MarkAttendance(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": err.Error(),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -138,116 +140,90 @@ func MarkAttendance(c *gin.Context) {
 		active      bool
 		sessionYear string
 		studentYear string
+		startTime   time.Time
 	)
 
-	// Get session status and year
+	// Get session status, year, and start_time (need start_time for late detection)
 	err := db.Pool.QueryRow(
 		context.Background(),
-		`
-		SELECT s.active, c.year
-		FROM attendance_sessions s
-		JOIN classrooms c ON c.id = s.room_id
-		WHERE s.id = $1
-		`,
+		`SELECT s.active, c.year, s.start_time
+		 FROM attendance_sessions s
+		 JOIN classrooms c ON c.id = s.room_id
+		 WHERE s.id = $1`,
 		req.SessionID,
-	).Scan(&active, &sessionYear)
+	).Scan(&active, &sessionYear, &startTime)
 
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": "session not found",
-		})
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 		return
 	}
 
 	if !active {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "session is not active",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "session is not active"})
 		return
 	}
 
-	// Get student year
+	// Verify student is enrolled in this year
 	err = db.Pool.QueryRow(
 		context.Background(),
-		`
-		SELECT year
-		FROM students
-		WHERE id = $1
-		`,
+		`SELECT year FROM students WHERE id = $1`,
 		studentID,
 	).Scan(&studentYear)
 
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": "student not found",
-		})
+		c.JSON(http.StatusNotFound, gin.H{"error": "student not found"})
 		return
 	}
 
-	// Verify student belongs to same year
 	if sessionYear != studentYear {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error": "student not assigned to this class",
-		})
+		c.JSON(http.StatusForbidden, gin.H{"error": "student not assigned to this class"})
 		return
 	}
 
 	// Prevent duplicate attendance
 	var alreadyMarked bool
-
 	err = db.Pool.QueryRow(
 		context.Background(),
-		`
-		SELECT EXISTS(
-			SELECT 1
-			FROM attendance
-			WHERE session_id = $1
-			AND student_id = $2
-		)
-		`,
-		req.SessionID,
-		studentID,
+		`SELECT EXISTS(
+			SELECT 1 FROM attendance
+			WHERE session_id = $1 AND student_id = $2
+		)`,
+		req.SessionID, studentID,
 	).Scan(&alreadyMarked)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "failed to check attendance",
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check attendance"})
 		return
 	}
 
 	if alreadyMarked {
-		c.JSON(http.StatusConflict, gin.H{
-			"error": "attendance already marked",
-		})
+		c.JSON(http.StatusConflict, gin.H{"error": "attendance already marked"})
 		return
 	}
 
-	// Insert attendance
+	// Determine status — late if marked >15 min after start
+	status := "present"
+	if time.Since(startTime).Minutes() > LATE_THRESHOLD_MINUTES {
+		status = "late"
+	}
+
+	// Insert attendance with status and source tracking
 	_, err = db.Pool.Exec(
 		context.Background(),
-		`
-		INSERT INTO attendance (
-			session_id,
-			student_id,
-			status
-		)
-		VALUES ($1, $2, 'present')
-		`,
-		req.SessionID,
-		studentID,
+		`INSERT INTO attendance (session_id, student_id, status, marked_by, marked_by_user_id)
+		 VALUES ($1, $2, $3, 'student', $2)`,
+		req.SessionID, studentID, status,
 	)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "failed to mark attendance",
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to mark attendance"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "attendance marked",
 		"session": req.SessionID,
+		"status":  status,
 	})
 }
 
@@ -291,7 +267,7 @@ func GetSessionAttendance(c *gin.Context) {
 	sessionID := c.Param("session_id")
 
 	rows, err := db.Pool.Query(context.Background(),
-		`SELECT s.name, s.roll_number, s.department, a.status, a.marked_at
+		`SELECT s.name, s.roll_number, s.department, a.status, a.marked_at, a.marked_by
 		 FROM attendance a
 		 JOIN students s ON s.id = a.student_id
 		 WHERE a.session_id = $1
@@ -310,12 +286,13 @@ func GetSessionAttendance(c *gin.Context) {
 		Department string `json:"department"`
 		Status     string `json:"status"`
 		MarkedAt   string `json:"marked_at"`
+		MarkedBy   string `json:"marked_by"`
 	}
 
 	var records []Record
 	for rows.Next() {
 		var r Record
-		rows.Scan(&r.Name, &r.RollNumber, &r.Department, &r.Status, &r.MarkedAt)
+		rows.Scan(&r.Name, &r.RollNumber, &r.Department, &r.Status, &r.MarkedAt, &r.MarkedBy)
 		records = append(records, r)
 	}
 
@@ -727,4 +704,108 @@ func GetProfessorSessions(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"sessions": sessions})
+}
+
+// GET /sessions/:session_id/students
+// Returns all students eligible for this session (matched by year)
+func GetEligibleStudents(c *gin.Context) {
+	sessionID := c.Param("session_id")
+
+	rows, err := db.Pool.Query(context.Background(),
+		`SELECT s.id, s.name, s.roll_number, s.department,
+		        EXISTS(SELECT 1 FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id) as marked,
+		        COALESCE((SELECT a.status FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as status,
+		        COALESCE((SELECT a.marked_by FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as marked_by
+		 FROM students s
+		 JOIN attendance_sessions sess ON sess.id = $1
+		 JOIN classrooms r ON r.id = sess.room_id
+		 WHERE s.year = r.year
+		 ORDER BY s.roll_number`,
+		sessionID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	type Student struct {
+		ID         string `json:"id"`
+		Name       string `json:"name"`
+		RollNumber string `json:"roll_number"`
+		Department string `json:"department"`
+		Marked     bool   `json:"marked"`
+		Status     string `json:"status"`
+		MarkedBy   string `json:"marked_by"`
+	}
+
+	var students []Student
+	for rows.Next() {
+		var s Student
+		rows.Scan(&s.ID, &s.Name, &s.RollNumber, &s.Department, &s.Marked, &s.Status, &s.MarkedBy)
+		students = append(students, s)
+	}
+	if students == nil {
+		students = []Student{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"students": students, "count": len(students)})
+}
+
+// POST /sessions/:session_id/override
+// Professor manually marks a student present/late/absent/excused
+func OverrideAttendance(c *gin.Context) {
+	sessionID := c.Param("session_id")
+	professorID, _ := c.Get("user_id")
+
+	var req struct {
+		StudentID string `json:"student_id" binding:"required"`
+		Status    string `json:"status" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Status != "present" && req.Status != "late" && req.Status != "absent" && req.Status != "excused" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
+		return
+	}
+
+	// Upsert — overwrite existing attendance
+	_, err := db.Pool.Exec(context.Background(),
+		`INSERT INTO attendance (session_id, student_id, status, marked_by, marked_by_user_id)
+		 VALUES ($1, $2, $3, 'professor', $4)
+		 ON CONFLICT (session_id, student_id) DO UPDATE
+		 SET status = EXCLUDED.status,
+		     marked_by = 'professor',
+		     marked_by_user_id = EXCLUDED.marked_by_user_id,
+		     marked_at = NOW()`,
+		sessionID, req.StudentID, req.Status, professorID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	log.Printf("Override: prof=%v marked student=%s as %s in session=%s", professorID, req.StudentID, req.Status, sessionID)
+	c.JSON(http.StatusOK, gin.H{"message": "attendance updated"})
+}
+
+// DELETE /sessions/:session_id/attendance/:student_id
+// Professor removes a student's attendance mark
+func RemoveAttendance(c *gin.Context) {
+	sessionID := c.Param("session_id")
+	studentID := c.Param("student_id")
+
+	_, err := db.Pool.Exec(context.Background(),
+		`DELETE FROM attendance WHERE session_id = $1 AND student_id = $2`,
+		sessionID, studentID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "attendance removed"})
 }

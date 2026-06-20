@@ -43,6 +43,9 @@ func Setup(r *gin.Engine) {
 		professor.POST("/timetable/copy-week", handlers.CopyWeek)
 		professor.GET("/timetable/week", handlers.GetTimetableWeek)
 		professor.GET("/professor/:id/sessions", handlers.GetProfessorSessions)
+		professor.GET("/sessions/:session_id/students", handlers.GetEligibleStudents)
+		professor.POST("/sessions/:session_id/override", handlers.OverrideAttendance)
+		professor.DELETE("/sessions/:session_id/attendance/:student_id", handlers.RemoveAttendance)
 
 	}
 
