@@ -7,9 +7,13 @@ import (
 )
 
 func Setup(r *gin.Engine) {
+	// PUBLIC routes (NO AUTH)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
+
+	r.GET("/sessions/active", handlers.GetActiveSession)  // ← MOVED HERE (public for ESP32)
+	r.POST("/attendance/ble", handlers.MarkAttendanceBLE) // ← Already public
 
 	auth := r.Group("/auth")
 	{
@@ -19,10 +23,10 @@ func Setup(r *gin.Engine) {
 		auth.POST("/professor/register", handlers.RegisterProfessor)
 	}
 
+	// STUDENT routes (AUTH REQUIRED)
 	student := r.Group("/")
 	student.Use(middleware.AuthMiddleware())
 	{
-		student.GET("/sessions/active", handlers.GetActiveSession)
 		student.POST("/attendance/mark", handlers.MarkAttendance)
 		student.GET("/students/:id", handlers.GetStudent)
 		student.POST("/students/:id/register-ble", handlers.RegisterBLE)
@@ -30,6 +34,7 @@ func Setup(r *gin.Engine) {
 		student.GET("/classrooms/:room_name/count", handlers.GetClassroomCount)
 	}
 
+	// PROFESSOR routes (AUTH + ROLE REQUIRED)
 	professor := r.Group("/")
 	professor.Use(middleware.AuthMiddleware(), middleware.RequireRole("professor"))
 	{
@@ -46,10 +51,5 @@ func Setup(r *gin.Engine) {
 		professor.GET("/sessions/:session_id/students", handlers.GetEligibleStudents)
 		professor.POST("/sessions/:session_id/override", handlers.OverrideAttendance)
 		professor.DELETE("/sessions/:session_id/attendance/:student_id", handlers.RemoveAttendance)
-
 	}
-
-	// ESP32 - no auth
-	r.POST("/attendance/ble", handlers.MarkAttendanceBLE)
-
 }
