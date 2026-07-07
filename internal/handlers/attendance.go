@@ -104,6 +104,12 @@ func GetActiveSession(c *gin.Context) {
 	if endTime != nil {
 		resp["end_time"] = endTime.Format(time.RFC3339)
 	}
+	log.Printf(
+		"studentID=%v sessionID=%s alreadyMarked=%v",
+		studentID,
+		sessionID,
+		alreadyMarked,
+	)
 
 	c.JSON(http.StatusOK, resp)
 }
