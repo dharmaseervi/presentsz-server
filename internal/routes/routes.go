@@ -32,6 +32,7 @@ func Setup(r *gin.Engine) {
 		student.POST("/students/:id/register-ble", handlers.RegisterBLE)
 		student.GET("/students/:id/attendance", handlers.GetStudentAttendance)
 		student.GET("/classrooms/:room_name/count", handlers.GetClassroomCount)
+		student.GET("/timetable", handlers.GetTimetable)
 	}
 
 	// PROFESSOR routes (AUTH + ROLE REQUIRED)
@@ -40,7 +41,6 @@ func Setup(r *gin.Engine) {
 	{
 		professor.POST("/sessions", handlers.StartSession)
 		professor.GET("/classrooms", handlers.GetClassrooms)
-		professor.GET("/timetable", handlers.GetTimetable)
 		professor.POST("/sessions/:session_id/stop", handlers.StopSession)
 		professor.GET("/sessions/:session_id/attendance", handlers.GetSessionAttendance)
 		professor.POST("/timetable", handlers.AddTimetableEntry)
