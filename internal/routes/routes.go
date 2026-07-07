@@ -12,7 +12,7 @@ func Setup(r *gin.Engine) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	r.GET("/sessions/active", handlers.GetActiveSession)  // ← MOVED HERE (public for ESP32)
+	r.GET("/esp32/sessions/active", handlers.GetESP32ActiveSession)
 	r.POST("/attendance/ble", handlers.MarkAttendanceBLE) // ← Already public
 
 	auth := r.Group("/auth")
@@ -33,6 +33,7 @@ func Setup(r *gin.Engine) {
 		student.GET("/students/:id/attendance", handlers.GetStudentAttendance)
 		student.GET("/classrooms/:room_name/count", handlers.GetClassroomCount)
 		student.GET("/timetable", handlers.GetTimetable)
+		student.GET("/sessions/active", handlers.GetActiveSession)
 	}
 
 	// PROFESSOR routes (AUTH + ROLE REQUIRED)

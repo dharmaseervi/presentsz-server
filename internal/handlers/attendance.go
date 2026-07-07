@@ -815,3 +815,44 @@ func RemoveAttendance(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "attendance removed"})
 }
+
+// GET /esp32/sessions/active?year=2nd Year
+func GetESP32ActiveSession(c *gin.Context) {
+	year := c.Query("year")
+	if year == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "year required"})
+		return
+	}
+
+	var sessionID, subject, roomName string
+	var endTime *time.Time
+
+	err := db.Pool.QueryRow(
+		context.Background(),
+		`SELECT s.id, s.subject, r.room_name, s.end_time
+         FROM attendance_sessions s
+         JOIN classrooms r ON r.id = s.room_id
+         WHERE r.year = $1 AND s.active = true
+         ORDER BY s.start_time DESC
+         LIMIT 1`,
+		year,
+	).Scan(&sessionID, &subject, &roomName, &endTime)
+
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"active": false})
+		return
+	}
+
+	resp := gin.H{
+		"active":     true,
+		"session_id": sessionID,
+		"subject":    subject,
+		"room_name":  roomName,
+	}
+
+	if endTime != nil {
+		resp["end_time"] = endTime.Format(time.RFC3339)
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
