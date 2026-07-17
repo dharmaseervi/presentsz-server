@@ -2,36 +2,52 @@ package middleware
 
 import (
 	"net/http"
-	"os"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
+var jwtSecret = []byte("your-secret-key-here")
+
 type Claims struct {
 	UserID string `json:"user_id"`
-	Role   string `json:"role"` // "student" or "professor"
+	Role   string `json:"role"`
 	jwt.RegisteredClaims
+}
+
+func GenerateToken(userID, role string) (string, error) {
+	claims := Claims{
+		UserID: userID,
+		Role:   role,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(jwtSecret)
 }
 
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing or invalid token"})
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "authorization header required"})
+			c.Abort()
 			return
 		}
 
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 		claims := &Claims{}
-
-		token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
-			return []byte(os.Getenv("JWT_SECRET")), nil
+		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+			return jwtSecret, nil
 		})
 
 		if err != nil || !token.Valid {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
+			c.Abort()
 			return
 		}
 
@@ -41,13 +57,27 @@ func AuthMiddleware() gin.HandlerFunc {
 	}
 }
 
-func RequireRole(role string) gin.HandlerFunc {
+// RequireRole allows only specified roles (variadic - accepts multiple roles)
+func RequireRole(allowedRoles ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userRole, _ := c.Get("role")
-		if userRole != role {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		userRole, exists := c.Get("role")
+		if !exists {
+			c.JSON(http.StatusForbidden, gin.H{"error": "role not found"})
+			c.Abort()
 			return
 		}
-		c.Next()
+
+		for _, role := range allowedRoles {
+			if userRole == role {
+				c.Next()
+				return
+			}
+		}
+
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":          "insufficient permissions",
+			"required_roles": allowedRoles,
+		})
+		c.Abort()
 	}
 }

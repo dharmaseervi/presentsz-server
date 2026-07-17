@@ -2,170 +2,71 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
-	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/yourusername/presentsz-server/internal/db"
 	"github.com/yourusername/presentsz-server/internal/middleware"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// POST /auth/register
-func RegisterStudent(c *gin.Context) {
-	var req struct {
-		Name       string `json:"name" binding:"required"`
-		Email      string `json:"email" binding:"required,email"`
-		Phone      string `json:"phone" binding:"required"`
-		RollNumber string `json:"roll_number" binding:"required"`
-		Department string `json:"department" binding:"required"`
-		Year       string `json:"year" binding:"required"`
-		Semester   string `json:"semester" binding:"required"`
-		Password   string `json:"password" binding:"required,min=8"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
-		return
-	}
-
-	var studentID string
-	err = db.Pool.QueryRow(context.Background(),
-		`INSERT INTO students (name, email, phone, roll_number, department, year, semester, password_hash)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-		req.Name, req.Email, req.Phone, req.RollNumber,
-		req.Department, req.Year, req.Semester, string(hash),
-	).Scan(&studentID)
-
-	if err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "email or roll number already exists"})
-		return
-	}
-
-	token, err := generateToken(studentID, "student")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
-		return
-	}
-
-	c.JSON(http.StatusCreated, gin.H{
-		"token":      token,
-		"student_id": studentID,
-		"message":    "registered successfully",
-	})
-}
-
-// POST /auth/login
-func LoginStudent(c *gin.Context) {
-	var req struct {
-		Email    string `json:"email" binding:"required,email"`
-		Password string `json:"password" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	var studentID, passwordHash string
-	err := db.Pool.QueryRow(context.Background(),
-		`SELECT id, password_hash FROM students WHERE email = $1`, req.Email,
-	).Scan(&studentID, &passwordHash)
-
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
-		return
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
-		return
-	}
-
-	token, err := generateToken(studentID, "student")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"token": token, "student_id": studentID})
-}
-
-// POST /auth/professor/login
-func LoginProfessor(c *gin.Context) {
-	var req struct {
-		Email    string `json:"email" binding:"required,email"`
-		Password string `json:"password" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	var profID, passwordHash string
-	err := db.Pool.QueryRow(context.Background(),
-		`SELECT id, password_hash FROM professors WHERE email = $1`, req.Email,
-	).Scan(&profID, &passwordHash)
-
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
-		return
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
-		return
-	}
-
-	token, err := generateToken(profID, "professor")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"token": token, "professor_id": profID})
-}
-
-func generateToken(userID, role string) (string, error) {
-	claims := middleware.Claims{
-		UserID: userID,
-		Role:   role,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(os.Getenv("JWT_SECRET")))
-}
-
 // POST /students/:id/register-ble
+// This endpoint is called ONCE from the mobile app on first login
 func RegisterBLE(c *gin.Context) {
-	studentID := c.Param("id")
+	studentID, _ := c.Get("user_id")
+
 	var req struct {
 		BLEUUID  string `json:"ble_uuid" binding:"required"`
-		DeviceID string `json:"device_id"`
+		DeviceID string `json:"device_id" binding:"required"`
 	}
+
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	_, err := db.Pool.Exec(context.Background(),
-		`UPDATE students SET ble_uuid = $1, device_id = $2 WHERE id = $3`,
-		req.BLEUUID, req.DeviceID, studentID,
-	)
+	// Check if student already has BLE registered
+	var existingUUID *string
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT ble_uuid FROM students WHERE id = $1`, studentID,
+	).Scan(&existingUUID)
+
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to register BLE"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "student not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "BLE UUID registered"})
+
+	// If already registered, don't allow re-registration (security)
+	if existingUUID != nil && *existingUUID != "" {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "BLE device already registered for this student",
+			"message": "Contact admin to reset device",
+		})
+		return
+	}
+
+	// Update
+	_, err = db.Pool.Exec(context.Background(),
+		`UPDATE students 
+         SET ble_uuid = $1, device_id = $2
+         WHERE id = $3`,
+		req.BLEUUID, req.DeviceID, studentID,
+	)
+
+	if err != nil {
+		// If UUID unique constraint fails, someone else has this UUID
+		c.JSON(http.StatusConflict, gin.H{"error": "device UUID already in use"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "device registered successfully",
+		"ble_uuid":  req.BLEUUID,
+		"device_id": req.DeviceID,
+	})
 }
 
 func RegisterProfessor(c *gin.Context) {
@@ -203,4 +104,259 @@ func RegisterProfessor(c *gin.Context) {
 		"email": req.Email,
 		"name":  req.Name,
 	})
+}
+
+// ============================================
+// STUDENT LOGIN (USN + Password)
+// ============================================
+func LoginStudent(c *gin.Context) {
+	var req struct {
+		USN      string `json:"usn" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var (
+		id, name, email, rollNumber, year, semester, department string
+		passwordHash                                            string
+		passwordResetRequired                                   bool
+		passwordExpiresAt                                       *time.Time
+		sectionID                                               *string
+	)
+
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT id, name, email, password_hash, roll_number, 
+		        year, semester, department, section_id,
+		        password_reset_required, password_expires_at
+		 FROM students WHERE roll_number = $1`,
+		strings.ToUpper(req.USN),
+	).Scan(&id, &name, &email, &passwordHash, &rollNumber,
+		&year, &semester, &department, &sectionID,
+		&passwordResetRequired, &passwordExpiresAt)
+
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
+
+	// Verify password
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
+
+	// Check password expiry
+	if passwordResetRequired && passwordExpiresAt != nil && time.Now().After(*passwordExpiresAt) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":                   "password_expired",
+			"password_reset_required": true,
+			"message":                 "Your temporary password has expired. Contact admin to reset.",
+		})
+		return
+	}
+
+	// Get section details
+	var sectionCode, sectionLetter *string
+	if sectionID != nil {
+		db.Pool.QueryRow(context.Background(),
+			`SELECT section_code, section_letter FROM sections WHERE id = $1`, *sectionID,
+		).Scan(&sectionCode, &sectionLetter)
+	}
+
+	// Generate token
+	token, err := middleware.GenerateToken(id, "student")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	response := gin.H{
+		"token":                   token,
+		"user_id":                 id,
+		"name":                    name,
+		"email":                   email,
+		"roll_number":             rollNumber,
+		"year":                    year,
+		"semester":                semester,
+		"department":              department,
+		"section_id":              sectionID,
+		"section_code":            sectionCode,
+		"password_reset_required": passwordResetRequired,
+	}
+
+	if passwordResetRequired && passwordExpiresAt != nil {
+		daysLeft := int(time.Until(*passwordExpiresAt).Hours() / 24)
+		response["password_message"] = fmt.Sprintf("Please change your password within %d days.", daysLeft)
+		response["days_until_expiry"] = daysLeft
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// ============================================
+// PROFESSOR LOGIN (Faculty ID only)
+// ============================================
+func LoginProfessor(c *gin.Context) {
+	var req struct {
+		FacultyID string `json:"faculty_id" binding:"required"`
+		Password  string `json:"password" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var (
+		id, name, email, subject, role, passwordHash, facultyID string
+		department                                              *string
+	)
+
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT id, name, email, subject, COALESCE(role, 'professor'), 
+		        password_hash, COALESCE(faculty_id, ''), department
+		 FROM professors WHERE faculty_id = $1`,
+		strings.ToUpper(strings.TrimSpace(req.FacultyID)),
+	).Scan(&id, &name, &email, &subject, &role, &passwordHash, &facultyID, &department)
+
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
+
+	token, err := middleware.GenerateToken(id, role)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token":      token,
+		"user_id":    id,
+		"name":       name,
+		"email":      email,
+		"faculty_id": facultyID,
+		"subject":    subject,
+		"role":       role,
+		"department": department,
+	})
+}
+
+func LoginAdmin(c *gin.Context) {
+	var req struct {
+		Email    string `json:"email" binding:"required,email"`
+		Password string `json:"password" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var (
+		id, name, email, passwordHash, role string
+	)
+
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT id, name, email, password_hash, COALESCE(role, 'professor')
+		 FROM professors WHERE email = $1 AND role = 'admin'`,
+		strings.ToLower(strings.TrimSpace(req.Email)),
+	).Scan(&id, &name, &email, &passwordHash, &role)
+
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
+
+	token, err := middleware.GenerateToken(id, role)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token":   token,
+		"user_id": id,
+		"name":    name,
+		"email":   email,
+		"role":    role,
+	})
+}
+
+// ============================================
+// CHANGE PASSWORD (Student)
+// ============================================
+func ChangePassword(c *gin.Context) {
+	studentID, _ := c.Get("user_id")
+
+	var req struct {
+		CurrentPassword string `json:"current_password" binding:"required"`
+		NewPassword     string `json:"new_password" binding:"required,min=6"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get current password
+	var currentHash string
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT password_hash FROM students WHERE id = $1`, studentID,
+	).Scan(&currentHash)
+
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "student not found"})
+		return
+	}
+
+	// Verify current password
+	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(req.CurrentPassword)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "current password is incorrect"})
+		return
+	}
+
+	// Prevent same password
+	if req.CurrentPassword == req.NewPassword {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new password must be different"})
+		return
+	}
+
+	// Hash new password
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		return
+	}
+
+	// Update
+	_, err = db.Pool.Exec(context.Background(),
+		`UPDATE students 
+		 SET password_hash = $1, 
+		     password_reset_required = false,
+		     password_expires_at = NULL
+		 WHERE id = $2`,
+		string(newHash), studentID,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update password"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "password updated successfully"})
 }
