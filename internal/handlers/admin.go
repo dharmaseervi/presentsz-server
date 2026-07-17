@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -594,4 +595,286 @@ func ResetStudentDevice(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "device reset, student can register new device on next login",
 	})
+}
+
+// Columns: Faculty Code | Name | Department | Designation | Email | Phone | Status
+func BulkUploadFaculty(c *gin.Context) {
+	rows, err := parseExcel(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(rows) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no data rows"})
+		return
+	}
+
+	adminID, _ := c.Get("user_id")
+	created, skipped, errors := 0, 0, 0
+	var results []gin.H
+
+	for i, row := range rows[1:] {
+		if len(row) == 0 || cellAt(row, 0) == "" {
+			continue
+		}
+		facultyCode := strings.ToUpper(cellAt(row, 0))
+		name := cellAt(row, 1)
+		dept := cellAt(row, 2)
+		designation := cellAt(row, 3)
+		email := strings.ToLower(cellAt(row, 4))
+		phone := cellAt(row, 5)
+		status := cellAt(row, 6)
+		if status == "" {
+			status = "Active"
+		}
+
+		if facultyCode == "" || name == "" {
+			results = append(results, gin.H{"row": i + 2, "code": facultyCode, "status": "error", "error": "missing code or name"})
+			errors++
+			continue
+		}
+
+		// Auto-generate email if missing
+		if email == "" {
+			email = fmt.Sprintf("%s@presenze.local", strings.ToLower(facultyCode))
+		}
+
+		// Check if already exists
+		var existingID string
+		err := db.Pool.QueryRow(context.Background(),
+			`SELECT id FROM professors WHERE faculty_id = $1 OR email = $2`,
+			facultyCode, email,
+		).Scan(&existingID)
+		if err == nil {
+			results = append(results, gin.H{"row": i + 2, "code": facultyCode, "name": name, "status": "skipped", "error": "already exists"})
+			skipped++
+			continue
+		}
+
+		// Password = Faculty Code
+		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(facultyCode), bcrypt.DefaultCost)
+
+		_, err = db.Pool.Exec(context.Background(),
+			`INSERT INTO professors 
+			 (name, email, faculty_id, subject, password_hash, role, department, designation, phone, status, created_by)
+			 VALUES ($1, $2, $3, '', $4, 'professor', $5, $6, $7, $8, $9)`,
+			name, email, facultyCode, string(hashedPassword),
+			dept, designation, nullIfEmpty(phone), status, adminID,
+		)
+		if err != nil {
+			results = append(results, gin.H{"row": i + 2, "code": facultyCode, "status": "error", "error": err.Error()})
+			errors++
+			continue
+		}
+		created++
+		results = append(results, gin.H{"row": i + 2, "code": facultyCode, "name": name, "status": "created"})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "faculty upload complete", "total": len(rows) - 1,
+		"success": created, "skipped": skipped, "errors": errors, "results": results,
+	})
+}
+
+// Columns: Section Code | Department | Year | Section Letter | Capacity | Academic Year
+func BulkUploadSections(c *gin.Context) {
+	rows, err := parseExcel(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(rows) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no data rows"})
+		return
+	}
+
+	// Get active academic year id
+	var activeYearID string
+	db.Pool.QueryRow(context.Background(),
+		`SELECT id FROM academic_years WHERE is_active = true LIMIT 1`,
+	).Scan(&activeYearID)
+
+	created, skipped, errors := 0, 0, 0
+	var results []gin.H
+
+	for i, row := range rows[1:] {
+		if len(row) == 0 || cellAt(row, 0) == "" {
+			continue
+		}
+		sectionCode := strings.ToUpper(cellAt(row, 0))
+		dept := strings.ToUpper(cellAt(row, 1))
+		year := cellAt(row, 2)
+		letter := strings.ToUpper(cellAt(row, 3))
+		capStr := cellAt(row, 4)
+
+		if sectionCode == "" || dept == "" || year == "" {
+			results = append(results, gin.H{"row": i + 2, "code": sectionCode, "status": "error", "error": "missing required fields"})
+			errors++
+			continue
+		}
+		if letter == "" {
+			letter = "A"
+		}
+		capacity, _ := strconv.Atoi(capStr)
+		if capacity == 0 {
+			capacity = 60
+		}
+
+		var yearID interface{} = nil
+		if activeYearID != "" {
+			yearID = activeYearID
+		}
+
+		_, err := db.Pool.Exec(context.Background(),
+			`INSERT INTO sections (section_code, department, year, section_letter, capacity, academic_year_id)
+			 VALUES ($1, $2, $3, $4, $5, $6)
+			 ON CONFLICT (section_code) DO NOTHING`,
+			sectionCode, dept, year, letter, capacity, yearID,
+		)
+		if err != nil {
+			results = append(results, gin.H{"row": i + 2, "code": sectionCode, "status": "error", "error": err.Error()})
+			errors++
+			continue
+		}
+		created++
+		results = append(results, gin.H{"row": i + 2, "code": sectionCode, "name": year + " " + dept, "status": "created"})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "sections upload complete", "total": len(rows) - 1,
+		"success": created, "skipped": skipped, "errors": errors, "results": results,
+	})
+}
+
+// Columns: Programme | Semester | Section | Day | Start Time | End Time | Subject Code | Faculty Code | Room Code | Status
+func BulkUploadTimetable(c *gin.Context) {
+	rows, err := parseExcel(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(rows) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no data rows"})
+		return
+	}
+
+	created, errors := 0, 0
+	var results []gin.H
+
+	for i, row := range rows[1:] {
+		if len(row) == 0 || cellAt(row, 0) == "" {
+			continue
+		}
+		programme := cellAt(row, 0)
+		semester := cellAt(row, 1)
+		section := strings.ToUpper(cellAt(row, 2))
+		day := cellAt(row, 3)
+		startTime := cellAt(row, 4)
+		endTime := cellAt(row, 5)
+		subjectCode := strings.ToUpper(cellAt(row, 6))
+		facultyCode := strings.ToUpper(cellAt(row, 7))
+		roomCode := strings.ToUpper(cellAt(row, 8))
+		status := cellAt(row, 9)
+		if status == "" {
+			status = "Active"
+		}
+
+		if day == "" || startTime == "" || subjectCode == "" || facultyCode == "" {
+			results = append(results, gin.H{"row": i + 2, "code": subjectCode, "status": "error", "error": "missing required fields"})
+			errors++
+			continue
+		}
+		if section == "" {
+			section = "A"
+		}
+
+		_, err := db.Pool.Exec(context.Background(),
+			`INSERT INTO timetable 
+			 (programme, semester, section, day, start_time, end_time, subject_code, faculty_code, room_code, status)
+			 VALUES ($1, $2, $3, $4, $5::time, $6::time, $7, $8, $9, $10)`,
+			programme, semester, section, day, startTime, endTime,
+			subjectCode, facultyCode, roomCode, status,
+		)
+		if err != nil {
+			results = append(results, gin.H{"row": i + 2, "code": subjectCode, "status": "error", "error": err.Error()})
+			errors++
+			continue
+		}
+		created++
+		results = append(results, gin.H{"row": i + 2, "code": subjectCode, "name": day + " " + startTime, "status": "created"})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "timetable upload complete", "total": len(rows) - 1,
+		"success": created, "skipped": 0, "errors": errors, "results": results,
+	})
+}
+func ListTimetable(c *gin.Context) {
+	rows, err := db.Pool.Query(context.Background(),
+		`SELECT t.id, t.programme, t.semester, t.section, t.day,
+		        t.start_time::text, t.end_time::text,
+		        t.subject_code, COALESCE(s.subject_name, ''),
+		        t.faculty_code, COALESCE(p.name, ''),
+		        t.room_code, t.status
+		 FROM timetable t
+		 LEFT JOIN subjects s ON s.subject_code = t.subject_code
+		 LEFT JOIN professors p ON p.faculty_id = t.faculty_code
+		 ORDER BY t.day, t.start_time`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var list []gin.H
+	for rows.Next() {
+
+		var id, prog, sem, sec, day, start, end, subCode, subName, facCode, facName, roomCode, status string
+		err := rows.Scan(&id, &prog, &sem, &sec, &day, &start, &end, &subCode, &subName, &facCode, &facName, &roomCode, &status)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		list = append(list, gin.H{
+			"id": id, "programme": prog, "semester": sem, "section": sec, "day": day,
+			"start_time": start, "end_time": end,
+			"subject_code": subCode, "subject_name": subName,
+			"faculty_code": facCode, "faculty_name": facName,
+			"room_code": roomCode, "status": status,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"timetable": list, "count": len(list)})
+}
+
+func CreateTimetableEntry(c *gin.Context) {
+	var req struct {
+		Programme   string `json:"programme"`
+		Semester    string `json:"semester"`
+		Section     string `json:"section"`
+		Day         string `json:"day" binding:"required"`
+		StartTime   string `json:"start_time" binding:"required"`
+		EndTime     string `json:"end_time"`
+		SubjectCode string `json:"subject_code" binding:"required"`
+		FacultyCode string `json:"faculty_code" binding:"required"`
+		RoomCode    string `json:"room_code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Section == "" {
+		req.Section = "A"
+	}
+	var id string
+	err := db.Pool.QueryRow(context.Background(),
+		`INSERT INTO timetable (programme, semester, section, day, start_time, end_time, subject_code, faculty_code, room_code, status)
+		 VALUES ($1,$2,$3,$4,$5::time,$6::time,$7,$8,$9,'Active') RETURNING id`,
+		req.Programme, req.Semester, req.Section, req.Day, req.StartTime, req.EndTime,
+		strings.ToUpper(req.SubjectCode), strings.ToUpper(req.FacultyCode), strings.ToUpper(req.RoomCode),
+	).Scan(&id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"message": "class added", "id": id})
 }

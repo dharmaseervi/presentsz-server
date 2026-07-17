@@ -75,6 +75,36 @@ func Setup(r *gin.Engine) {
 		// Section management
 		admin.GET("/sections", handlers.ListSections)
 		admin.POST("/sections", handlers.CreateSection)
+
+		// HODs
+		admin.POST("/hods/bulk-upload", handlers.BulkUploadHODs)
+		admin.GET("/hods", handlers.ListHODs)
+		admin.POST("/hods", handlers.CreateHOD)
+		admin.DELETE("/hods/:id", handlers.DeleteHOD)
+
+		// Subjects
+		admin.POST("/subjects/bulk-upload", handlers.BulkUploadSubjects)
+		admin.GET("/subjects", handlers.ListSubjects)
+		admin.POST("/subjects", handlers.CreateSubject)
+		admin.DELETE("/subjects/:id", handlers.DeleteSubject)
+
+		// Classrooms
+		admin.POST("/classrooms/bulk-upload", handlers.BulkUploadClassrooms)
+		admin.GET("/classrooms", handlers.ListClassrooms)
+		admin.POST("/classrooms", handlers.CreateClassroom)
+		admin.DELETE("/classrooms/:id", handlers.DeleteClassroom)
+
+		admin.POST("/professors/bulk-upload", handlers.BulkUploadFaculty)
+		admin.POST("/sections/bulk-upload", handlers.BulkUploadSections)
+		admin.POST("/timetable/bulk-upload", handlers.BulkUploadTimetable)
+		admin.GET("/timetable", handlers.ListTimetable)
+		admin.POST("/timetable", handlers.CreateTimetableEntry)
+		admin.DELETE("/timetable/:id", handlers.DeleteTimetableEntry)
+
+		admin.POST("/allocations/bulk-upload", handlers.BulkUploadAllocations)
+		admin.GET("/allocations", handlers.ListAllocations)
+		admin.POST("/allocations", handlers.CreateAllocation)
+		admin.DELETE("/allocations/:id", handlers.DeleteAllocation)
 	}
 	// Legacy public endpoints (Sections list can be public for dropdown)
 	r.GET("/sections", handlers.ListSections)
