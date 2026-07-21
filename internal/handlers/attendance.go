@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,32 +13,47 @@ import (
 )
 
 // POST /sessions
+// POST /sessions
 func StartSession(c *gin.Context) {
 	professorID, _ := c.Get("user_id")
+
 	var req struct {
-		RoomID  string `json:"room_id" binding:"required"`
-		Subject string `json:"subject" binding:"required"`
+		RoomCode    string `json:"room_code" binding:"required"`
+		SubjectCode string `json:"subject_code" binding:"required"`
+		Section     string `json:"section" binding:"required"`
+		Semester    string `json:"semester" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Stop any existing active session in this room
+	var roomID string
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT id FROM classrooms WHERE room_code = $1`, strings.ToUpper(req.RoomCode),
+	).Scan(&roomID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "room not found for code " + req.RoomCode})
+		return
+	}
+
+	// Stop any existing active session for this professor (not just this room —
+	// a professor can only run one class at a time)
 	db.Pool.Exec(context.Background(),
 		`UPDATE attendance_sessions SET active = false, end_time = NOW()
-		 WHERE room_id = $1 AND active = true`, req.RoomID)
+		 WHERE professor_id = $1 AND active = true`, professorID)
 
-	// Session lasts 1 hour by default
 	endTime := time.Now().Add(1 * time.Hour)
 
 	var sessionID string
-	err := db.Pool.QueryRow(context.Background(),
-		`INSERT INTO attendance_sessions (room_id, professor_id, subject, active, end_time)
-		 VALUES ($1, $2, $3, true, $4) RETURNING id`,
-		req.RoomID, professorID, req.Subject, endTime,
+	err = db.Pool.QueryRow(context.Background(),
+		`INSERT INTO attendance_sessions
+		    (room_id, professor_id, subject, section, semester, active, end_time)
+		 VALUES ($1, $2, $3, $4, $5, true, $6)
+		 RETURNING id`,
+		roomID, professorID, strings.ToUpper(req.SubjectCode),
+		strings.ToUpper(req.Section), req.Semester, endTime,
 	).Scan(&sessionID)
-
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start session"})
 		return
@@ -51,10 +67,12 @@ func StartSession(c *gin.Context) {
 }
 
 // GET /sessions/active?year=2nd Year
+// GET /sessions/active?section=A&semester=5
 func GetActiveSession(c *gin.Context) {
-	year := c.Query("year")
-	if year == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "year required"})
+	section := c.Query("section")
+	semester := c.Query("semester")
+	if section == "" || semester == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "section and semester required"})
 		return
 	}
 
@@ -67,9 +85,9 @@ func GetActiveSession(c *gin.Context) {
 		`SELECT s.id, s.subject, r.room_name, s.end_time
 		 FROM attendance_sessions s
 		 JOIN classrooms r ON r.id = s.room_id
-		 WHERE r.year = $1 AND s.active = true
+		 WHERE s.section = $1 AND s.semester = $2 AND s.active = true
 		 ORDER BY s.start_time DESC LIMIT 1`,
-		year,
+		strings.ToUpper(section), semester,
 	).Scan(&sessionID, &subject, &roomName, &endTime)
 
 	if err != nil {
@@ -77,7 +95,6 @@ func GetActiveSession(c *gin.Context) {
 		return
 	}
 
-	// Auto-expire if past end_time (only when set)
 	if endTime != nil && time.Now().After(*endTime) {
 		db.Pool.Exec(context.Background(),
 			`UPDATE attendance_sessions SET active = false WHERE id = $1`, sessionID)
@@ -85,32 +102,19 @@ func GetActiveSession(c *gin.Context) {
 		return
 	}
 
-	// Check if student already marked attendance
 	var alreadyMarked bool
 	db.Pool.QueryRow(context.Background(),
-		`SELECT EXISTS(
-			SELECT 1 FROM attendance
-			WHERE session_id = $1 AND student_id = $2
-		)`, sessionID, studentID,
+		`SELECT EXISTS(SELECT 1 FROM attendance WHERE session_id = $1 AND student_id = $2)`,
+		sessionID, studentID,
 	).Scan(&alreadyMarked)
 
 	resp := gin.H{
-		"active":         true,
-		"session_id":     sessionID,
-		"subject":        subject,
-		"room_name":      roomName,
-		"already_marked": alreadyMarked,
+		"active": true, "session_id": sessionID, "subject": subject,
+		"room_name": roomName, "already_marked": alreadyMarked,
 	}
 	if endTime != nil {
 		resp["end_time"] = endTime.Format(time.RFC3339)
 	}
-	log.Printf(
-		"studentID=%v sessionID=%s alreadyMarked=%v",
-		studentID,
-		sessionID,
-		alreadyMarked,
-	)
-
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -136,101 +140,74 @@ func MarkAttendance(c *gin.Context) {
 	var req struct {
 		SessionID string `json:"session_id" binding:"required"`
 	}
-
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	var (
-		active      bool
-		sessionYear string
-		studentYear string
-		startTime   time.Time
+		active         bool
+		sessionSection string
+		sessionSem     string
+		startTime      time.Time
 	)
-
-	// Get session status, year, and start_time (need start_time for late detection)
-	err := db.Pool.QueryRow(
-		context.Background(),
-		`SELECT s.active, c.year, s.start_time
-		 FROM attendance_sessions s
-		 JOIN classrooms c ON c.id = s.room_id
-		 WHERE s.id = $1`,
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT active, section, semester, start_time FROM attendance_sessions WHERE id = $1`,
 		req.SessionID,
-	).Scan(&active, &sessionYear, &startTime)
-
+	).Scan(&active, &sessionSection, &sessionSem, &startTime)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 		return
 	}
-
 	if !active {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "session is not active"})
 		return
 	}
 
-	// Verify student is enrolled in this year
-	err = db.Pool.QueryRow(
-		context.Background(),
-		`SELECT year FROM students WHERE id = $1`,
+	var studentSectionLetter, studentSemester string
+	err = db.Pool.QueryRow(context.Background(),
+		`SELECT COALESCE(sec.section_letter, ''), s.semester
+		 FROM students s
+		 LEFT JOIN sections sec ON sec.id = s.section_id
+		 WHERE s.id = $1`,
 		studentID,
-	).Scan(&studentYear)
-
+	).Scan(&studentSectionLetter, &studentSemester)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "student not found"})
 		return
 	}
 
-	if sessionYear != studentYear {
+	if strings.ToUpper(studentSectionLetter) != sessionSection || studentSemester != sessionSem {
 		c.JSON(http.StatusForbidden, gin.H{"error": "student not assigned to this class"})
 		return
 	}
 
-	// Prevent duplicate attendance
 	var alreadyMarked bool
-	err = db.Pool.QueryRow(
-		context.Background(),
-		`SELECT EXISTS(
-			SELECT 1 FROM attendance
-			WHERE session_id = $1 AND student_id = $2
-		)`,
+	db.Pool.QueryRow(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM attendance WHERE session_id = $1 AND student_id = $2)`,
 		req.SessionID, studentID,
 	).Scan(&alreadyMarked)
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check attendance"})
-		return
-	}
-
 	if alreadyMarked {
 		c.JSON(http.StatusConflict, gin.H{"error": "attendance already marked"})
 		return
 	}
 
-	// Determine status — late if marked >15 min after start
 	status := "present"
 	if time.Since(startTime).Minutes() > LATE_THRESHOLD_MINUTES {
 		status = "late"
 	}
 
-	// Insert attendance with status and source tracking
-	_, err = db.Pool.Exec(
-		context.Background(),
+	_, err = db.Pool.Exec(context.Background(),
 		`INSERT INTO attendance (session_id, student_id, status, marked_by, marked_by_user_id)
 		 VALUES ($1, $2, $3, 'student', $2)`,
 		req.SessionID, studentID, status,
 	)
-
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to mark attendance"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "attendance marked",
-		"session": req.SessionID,
-		"status":  status,
-	})
+	c.JSON(http.StatusOK, gin.H{"message": "attendance marked", "session": req.SessionID, "status": status})
 }
 
 // POST /attendance/ble  (called by ESP32)
@@ -336,18 +313,19 @@ func GetStudent(c *gin.Context) {
 // GET /classrooms
 func GetClassrooms(c *gin.Context) {
 	rows, _ := db.Pool.Query(context.Background(),
-		`SELECT id, room_name, year FROM classrooms ORDER BY room_name`)
+		`SELECT id, room_name, COALESCE(room_code, ''), year FROM classrooms ORDER BY room_name`)
 	defer rows.Close()
 
 	type Room struct {
 		ID       string `json:"id"`
 		RoomName string `json:"room_name"`
+		RoomCode string `json:"room_code"`
 		Year     string `json:"year"`
 	}
 	var rooms []Room
 	for rows.Next() {
 		var r Room
-		rows.Scan(&r.ID, &r.RoomName, &r.Year)
+		rows.Scan(&r.ID, &r.RoomName, &r.RoomCode, &r.Year)
 		rooms = append(rooms, r)
 	}
 	if rooms == nil {
@@ -399,11 +377,14 @@ func GetTimetable(c *gin.Context) {
 // POST /timetable
 func AddTimetableEntry(c *gin.Context) {
 	var req struct {
-		Year      string `json:"year" binding:"required"`
-		ClassDate string `json:"class_date" binding:"required"`
-		TimeSlot  string `json:"time_slot" binding:"required"`
-		Subject   string `json:"subject" binding:"required"`
-		RoomID    string `json:"room_id" binding:"required"`
+		Day         string `json:"day" binding:"required"`
+		StartTime   string `json:"start_time" binding:"required"`
+		EndTime     string `json:"end_time" binding:"required"`
+		SubjectCode string `json:"subject_code" binding:"required"`
+		FacultyCode string `json:"faculty_code" binding:"required"`
+		RoomCode    string `json:"room_code" binding:"required"`
+		Section     string `json:"section" binding:"required"`
+		Semester    string `json:"semester" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -412,16 +393,19 @@ func AddTimetableEntry(c *gin.Context) {
 
 	var id string
 	err := db.Pool.QueryRow(context.Background(),
-		`INSERT INTO timetable (year, class_date, time_slot, subject, room_id)
-		 VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-		req.Year, req.ClassDate, req.TimeSlot, req.Subject, req.RoomID,
+		`INSERT INTO timetable
+		    (day, start_time, end_time, subject_code, faculty_code, room_code, section, semester, status)
+		 VALUES ($1, $2::time, $3::time, $4, $5, $6, $7, $8, 'Active')
+		 RETURNING id`,
+		req.Day, req.StartTime, req.EndTime,
+		strings.ToUpper(req.SubjectCode), strings.ToUpper(req.FacultyCode), strings.ToUpper(req.RoomCode),
+		strings.ToUpper(req.Section), req.Semester,
 	).Scan(&id)
-
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add entry"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"id": id})
+	c.JSON(http.StatusCreated, gin.H{"id": id, "message": "class added"})
 }
 
 // DELETE /timetable/:id
@@ -574,68 +558,66 @@ func CopyWeek(c *gin.Context) {
 	})
 }
 
-// GET /timetable/week?year=2nd Year
+// GET /timetable/week?semester=3&section=A
+// Returns the full recurring weekly timetable (Mon–Sat) for a given semester/section
 func GetTimetableWeek(c *gin.Context) {
-	year := c.Query("year")
-	dateStr := c.Query("date")
-	if dateStr == "" {
-		dateStr = time.Now().Format("2006-01-02")
-	}
+	semester := c.Query("semester")
+	section := c.Query("section")
 
-	// Find Monday of the week containing the given date
-	date, err := time.Parse("2006-01-02", dateStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid date"})
+	if semester == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "semester is required"})
 		return
 	}
-	// Get Monday of that week
-	weekday := int(date.Weekday())
-	if weekday == 0 {
-		weekday = 7
-	} // Sunday = 7
-	monday := date.AddDate(0, 0, -(weekday - 1))
-	saturday := monday.AddDate(0, 0, 5)
+	if section == "" {
+		section = "A"
+	}
 
 	rows, err := db.Pool.Query(context.Background(),
-		`SELECT t.id, t.class_date, t.time_slot, t.subject, t.room_id, r.room_name
-         FROM timetable t
-         JOIN classrooms r ON r.id = t.room_id
-         WHERE t.year = $1
-           AND t.class_date >= $2
-           AND t.class_date <= $3
-         ORDER BY t.class_date, t.time_slot`,
-		year, monday.Format("2006-01-02"), saturday.Format("2006-01-02"),
+		`SELECT t.id, t.day, t.start_time::text, t.end_time::text,
+		        t.subject_code, COALESCE(s.subject_name,''),
+		        t.faculty_code, COALESCE(p.name,''),
+		        t.room_code, t.section, t.semester
+		 FROM timetable t
+		 LEFT JOIN subjects s ON s.subject_code = t.subject_code
+		 LEFT JOIN professors p ON p.faculty_id = t.faculty_code
+		 WHERE t.semester = $1 AND t.section = $2
+		 ORDER BY
+		    CASE t.day
+		      WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3
+		      WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6
+		      ELSE 7
+		    END,
+		    t.start_time`,
+		semester, strings.ToUpper(section),
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch timetable"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	defer rows.Close()
 
-	type Entry struct {
-		ID        string `json:"id"`
-		ClassDate string `json:"class_date"`
-		TimeSlot  string `json:"time_slot"`
-		Subject   string `json:"subject"`
-		RoomID    string `json:"room_id"`
-		RoomName  string `json:"room_name"`
-	}
-	var entries []Entry
+	var entries []gin.H
 	for rows.Next() {
-		var e Entry
-		var classDate time.Time
-		rows.Scan(&e.ID, &classDate, &e.TimeSlot, &e.Subject, &e.RoomID, &e.RoomName)
-		e.ClassDate = classDate.Format("2006-01-02")
-		entries = append(entries, e)
+		var id, day, start, end, subCode, subName, facCode, facName, room, sec, sem string
+		if err := rows.Scan(&id, &day, &start, &end, &subCode, &subName, &facCode, &facName, &room, &sec, &sem); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		entries = append(entries, gin.H{
+			"id": id, "day": day, "start_time": start, "end_time": end,
+			"subject_code": subCode, "subject_name": subName,
+			"faculty_code": facCode, "faculty_name": facName,
+			"room_code": room, "section": sec, "semester": sem,
+		})
 	}
 	if entries == nil {
-		entries = []Entry{}
+		entries = []gin.H{}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"entries":    entries,
-		"week_start": monday.Format("2006-01-02"),
-		"week_end":   saturday.Format("2006-01-02"),
+		"entries":  entries,
+		"semester": semester,
+		"section":  section,
 	})
 }
 
@@ -855,4 +837,56 @@ func GetESP32ActiveSession(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
+}
+
+// GET /professor/subjects — subjects/sections this professor is allocated to teach
+func GetProfessorSubjects(c *gin.Context) {
+	profID, _ := c.Get("user_id")
+
+	var facultyID string
+	db.Pool.QueryRow(context.Background(),
+		`SELECT COALESCE(faculty_id,'') FROM professors WHERE id = $1`, profID).Scan(&facultyID)
+
+	rows, _ := db.Pool.Query(context.Background(),
+		`SELECT DISTINCT sa.subject_code, COALESCE(s.subject_name,''), sa.section, sa.semester
+		 FROM subject_allocations sa
+		 LEFT JOIN subjects s ON s.subject_code = sa.subject_code
+		 WHERE sa.faculty_code = $1
+		 ORDER BY sa.semester, sa.subject_code`, facultyID)
+	defer rows.Close()
+
+	var subjects []gin.H
+	for rows.Next() {
+		var code, name, section, sem string
+		rows.Scan(&code, &name, &section, &sem)
+		subjects = append(subjects, gin.H{
+			"subject_code": code, "subject_name": name, "section": section, "semester": sem,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"subjects": subjects})
+}
+
+// GET /professor/me — the logged-in professor/HOD's own profile
+func GetMyProfile(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+
+	var (
+		name, email, role, status          string
+		facultyID, department, designation *string
+	)
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT name, email, COALESCE(role,'professor'), COALESCE(status,'Active'),
+		        faculty_id, department, designation
+		 FROM professors WHERE id = $1`,
+		userID,
+	).Scan(&name, &email, &role, &status, &facultyID, &department, &designation)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "profile not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"name": name, "email": email, "role": role, "status": status,
+		"faculty_id": facultyID, "department": department, "designation": designation,
+	})
 }

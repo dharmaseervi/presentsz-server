@@ -205,23 +205,26 @@ func LoginProfessor(c *gin.Context) {
 		FacultyID string `json:"faculty_id" binding:"required"`
 		Password  string `json:"password" binding:"required"`
 	}
-
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	var (
-		id, name, email, subject, role, passwordHash, facultyID string
-		department                                              *string
+		id, name, email, role, passwordHash, facultyID string
+		department                                     *string
+		passwordResetRequired                          bool
+		passwordExpiresAt                              *time.Time
 	)
 
 	err := db.Pool.QueryRow(context.Background(),
-		`SELECT id, name, email, subject, COALESCE(role, 'professor'), 
-		        password_hash, COALESCE(faculty_id, ''), department
+		`SELECT id, name, email, COALESCE(role,'professor'), password_hash,
+		        COALESCE(faculty_id,''), department,
+		        COALESCE(password_reset_required, false), password_expires_at
 		 FROM professors WHERE faculty_id = $1`,
 		strings.ToUpper(strings.TrimSpace(req.FacultyID)),
-	).Scan(&id, &name, &email, &subject, &role, &passwordHash, &facultyID, &department)
+	).Scan(&id, &name, &email, &role, &passwordHash, &facultyID, &department,
+		&passwordResetRequired, &passwordExpiresAt)
 
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
@@ -233,22 +236,38 @@ func LoginProfessor(c *gin.Context) {
 		return
 	}
 
+	if passwordResetRequired && passwordExpiresAt != nil && time.Now().After(*passwordExpiresAt) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":                   "password_expired",
+			"password_reset_required": true,
+			"message":                 "Your temporary password has expired. Contact admin to reset.",
+		})
+		return
+	}
+
 	token, err := middleware.GenerateToken(id, role)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"token":      token,
-		"user_id":    id,
-		"name":       name,
-		"email":      email,
-		"faculty_id": facultyID,
-		"subject":    subject,
-		"role":       role,
-		"department": department,
-	})
+	resp := gin.H{
+		"token":                   token,
+		"user_id":                 id,
+		"name":                    name,
+		"email":                   email,
+		"faculty_id":              facultyID,
+		"role":                    role,
+		"department":              department,
+		"password_reset_required": passwordResetRequired,
+	}
+	if passwordResetRequired && passwordExpiresAt != nil {
+		daysLeft := int(time.Until(*passwordExpiresAt).Hours() / 24)
+		resp["password_message"] = fmt.Sprintf("Please change your password within %d days.", daysLeft)
+		resp["days_until_expiry"] = daysLeft
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 func LoginAdmin(c *gin.Context) {
@@ -326,6 +345,7 @@ func ChangePassword(c *gin.Context) {
 
 	// Verify current password
 	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(req.CurrentPassword)); err != nil {
+		fmt.Println("PASSWORD MISMATCH for student", studentID) //
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "current password is incorrect"})
 		return
 	}
@@ -353,6 +373,57 @@ func ChangePassword(c *gin.Context) {
 		string(newHash), studentID,
 	)
 
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update password"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "password updated successfully"})
+}
+
+// POST /professors/change-password
+func ChangePasswordProfessor(c *gin.Context) {
+	profID, _ := c.Get("user_id")
+
+	var req struct {
+		CurrentPassword string `json:"current_password" binding:"required"`
+		NewPassword     string `json:"new_password" binding:"required,min=6"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var currentHash string
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT password_hash FROM professors WHERE id = $1`, profID,
+	).Scan(&currentHash)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "professor not found"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(req.CurrentPassword)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "current password is incorrect"})
+		return
+	}
+	if req.CurrentPassword == req.NewPassword {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new password must be different"})
+		return
+	}
+
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		return
+	}
+
+	_, err = db.Pool.Exec(context.Background(),
+		`UPDATE professors
+		 SET password_hash = $1, password_reset_required = false, password_expires_at = NULL
+		 WHERE id = $2`,
+		string(newHash), profID,
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update password"})
 		return

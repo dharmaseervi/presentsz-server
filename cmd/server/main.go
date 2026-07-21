@@ -73,66 +73,83 @@ func runMigrations() error {
 
 func runSessionScheduler() {
 	now := time.Now()
-	currentTime := now.Format("15:04")
-	windowStart := now.Add(-2 * time.Minute).Format("15:04")
-	today := now.Format("2006-01-02")
+	currentTime := now.Format("15:04:05")
+	windowStart := now.Add(-2 * time.Minute).Format("15:04:05")
+	today := now.Weekday().String() // "Monday", "Tuesday", ...
 
 	rows, err := db.Pool.Query(context.Background(),
-		`SELECT t.id, t.subject, t.room_id, t.time_slot,
-			LEAD(t.time_slot) OVER (
-				PARTITION BY t.room_id, t.class_date
-				ORDER BY t.time_slot
-			) as next_slot
+		`SELECT t.id, t.subject_code, t.faculty_code, t.room_code,
+		        t.start_time::text, t.end_time::text, t.section, t.semester
 		 FROM timetable t
-		 WHERE t.class_date = $1
-		   AND t.time_slot <= $2
-		   AND t.time_slot >= $3`,
+		 WHERE t.day = $1
+		   AND t.start_time <= $2
+		   AND t.start_time >= $3
+		   AND t.status = 'Active'`,
 		today, currentTime, windowStart,
 	)
 	if err != nil {
 		log.Println("Scheduler query error:", err)
 		return
 	}
-	defer rows.Close()
 
+	type entry struct {
+		id, subjectCode, facultyCode, roomCode string
+		startTime, endTime, section, semester  string
+	}
+	var toProcess []entry
 	for rows.Next() {
-		var entryID, subject, roomID, timeSlot string
-		var nextSlot *string
-		rows.Scan(&entryID, &subject, &roomID, &timeSlot, &nextSlot)
+		var e entry
+		if err := rows.Scan(&e.id, &e.subjectCode, &e.facultyCode, &e.roomCode,
+			&e.startTime, &e.endTime, &e.section, &e.semester); err != nil {
+			log.Println("Scheduler scan error:", err)
+			continue
+		}
+		toProcess = append(toProcess, e)
+	}
+	rows.Close()
 
-		// Calculate end time
-		var endTime time.Time
-		if nextSlot != nil {
-			parsed, err := time.ParseInLocation("15:04", *nextSlot, now.Location())
-			if err == nil {
-				endTime = time.Date(now.Year(), now.Month(), now.Day(),
-					parsed.Hour(), parsed.Minute(), 0, 0, now.Location())
-			}
-		} else {
-			endTime = now.Add(1 * time.Hour)
+	for _, e := range toProcess {
+		// Resolve room_code -> classrooms.id
+		var roomID string
+		err := db.Pool.QueryRow(context.Background(),
+			`SELECT id FROM classrooms WHERE room_code = $1`, e.roomCode,
+		).Scan(&roomID)
+		if err != nil {
+			log.Printf("Scheduler: room not found for code %s, skipping\n", e.roomCode)
+			continue
 		}
 
-		// Skip if session already exists for this slot today
+		// Resolve faculty_code -> professors.id
+		var professorID string
+		err = db.Pool.QueryRow(context.Background(),
+			`SELECT id FROM professors WHERE faculty_id = $1`, e.facultyCode,
+		).Scan(&professorID)
+		if err != nil {
+			log.Printf("Scheduler: professor not found for faculty_code %s, skipping\n", e.facultyCode)
+			continue
+		}
+
+		// Skip if a session already exists for this room+subject+section+semester today
 		var exists bool
 		db.Pool.QueryRow(context.Background(),
 			`SELECT EXISTS(
 				SELECT 1 FROM attendance_sessions
-				WHERE room_id = $1 AND subject = $2
+				WHERE room_id = $1 AND subject = $2 AND section = $3 AND semester = $4
 				AND DATE(start_time) = CURRENT_DATE
-			)`, roomID, subject,
+			)`, roomID, e.subjectCode, e.section, e.semester,
 		).Scan(&exists)
 		if exists {
 			continue
 		}
 
-		// Find a professor for this subject
-		var professorID string
-		err := db.Pool.QueryRow(context.Background(),
-			`SELECT id FROM professors WHERE subject = $1 LIMIT 1`, subject,
-		).Scan(&professorID)
-		if err != nil {
-			log.Printf("No professor found for subject %s, skipping\n", subject)
-			continue
+		// Compute today's end_time as a real timestamp
+		var endTime time.Time
+		endParsed, err := time.Parse("15:04:05", e.endTime)
+		if err == nil {
+			endTime = time.Date(now.Year(), now.Month(), now.Day(),
+				endParsed.Hour(), endParsed.Minute(), 0, 0, now.Location())
+		} else {
+			endTime = now.Add(1 * time.Hour)
 		}
 
 		// Deactivate any existing active session in this room
@@ -143,20 +160,22 @@ func runSessionScheduler() {
 		// Create session
 		var sessionID string
 		err = db.Pool.QueryRow(context.Background(),
-			`INSERT INTO attendance_sessions (room_id, professor_id, subject, active, end_time)
-			 VALUES ($1, $2, $3, true, $4) RETURNING id`,
-			roomID, professorID, subject, endTime,
+			`INSERT INTO attendance_sessions
+			    (room_id, professor_id, subject, section, semester, active, end_time)
+			 VALUES ($1, $2, $3, $4, $5, true, $6)
+			 RETURNING id`,
+			roomID, professorID, e.subjectCode, e.section, e.semester, endTime,
 		).Scan(&sessionID)
 		if err != nil {
-			log.Println("Failed to create session:", err)
+			log.Println("Scheduler: failed to create session:", err)
 			continue
 		}
 
-		log.Printf("✓ Auto-created session: %s | %s | ends %s\n",
-			subject, timeSlot, endTime.Format("15:04"))
+		log.Printf("✓ Auto-created session: %s | %s | section %s sem %s | ends %s\n",
+			e.subjectCode, e.startTime, e.section, e.semester, endTime.Format("15:04"))
 	}
 
-	// Auto-end expired sessions
+	// Auto-end expired sessions — unchanged, schema-agnostic
 	result, _ := db.Pool.Exec(context.Background(),
 		`UPDATE attendance_sessions
 		 SET active = false
@@ -165,7 +184,6 @@ func runSessionScheduler() {
 		log.Printf("✓ Auto-ended %d expired session(s)\n", n)
 	}
 }
-
 func startScheduler() {
 	// Run immediately on startup
 	runSessionScheduler()

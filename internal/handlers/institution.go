@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/xuri/excelize/v2"
@@ -231,8 +232,15 @@ func ListSubjects(c *gin.Context) {
 	dept := c.Query("department")
 	semester := c.Query("semester")
 
-	query := `SELECT id, subject_code, subject_name, department, COALESCE(programme,''), 
-	          COALESCE(semester,''), credits, type, status FROM subjects WHERE 1=1`
+	query := `SELECT id, subject_code, 
+	          COALESCE(subject_name, '') AS subject_name, 
+	          COALESCE(department, ''), 
+	          COALESCE(programme, ''), 
+	          COALESCE(semester, ''), 
+	          COALESCE(credits, 0), 
+	          COALESCE(type, ''), 
+	          COALESCE(status, '') 
+	          FROM subjects WHERE 1=1`
 	args := []interface{}{}
 	idx := 1
 	if dept != "" {
@@ -245,7 +253,7 @@ func ListSubjects(c *gin.Context) {
 		args = append(args, semester)
 		idx++
 	}
-	query += " ORDER BY semester, subject_code"
+	query += " ORDER BY subject_code"
 
 	rows, err := db.Pool.Query(context.Background(), query, args...)
 	if err != nil {
@@ -258,7 +266,10 @@ func ListSubjects(c *gin.Context) {
 	for rows.Next() {
 		var id, code, name, dept, prog, sem, typ, status string
 		var credits int
-		rows.Scan(&id, &code, &name, &dept, &prog, &sem, &credits, &typ, &status)
+		if err := rows.Scan(&id, &code, &name, &dept, &prog, &sem, &credits, &typ, &status); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 		list = append(list, gin.H{
 			"id": id, "subject_code": code, "subject_name": name, "department": dept,
 			"programme": prog, "semester": sem, "credits": credits, "type": typ, "status": status,
@@ -266,7 +277,6 @@ func ListSubjects(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"subjects": list, "count": len(list)})
 }
-
 func CreateSubject(c *gin.Context) {
 	var req struct {
 		SubjectCode string `json:"subject_code" binding:"required"`
@@ -595,4 +605,76 @@ func DeleteAllocation(c *gin.Context) {
 	id := c.Param("id")
 	db.Pool.Exec(context.Background(), `DELETE FROM subject_allocations WHERE id = $1`, id)
 	c.JSON(http.StatusOK, gin.H{"message": "deleted"})
+}
+
+// GET /professor/timetable?day=Monday — filtered to the logged-in professor's faculty_id
+func GetProfessorTimetable(c *gin.Context) {
+	profID, _ := c.Get("user_id")
+	day := c.Query("day")
+
+	var facultyID string
+	db.Pool.QueryRow(context.Background(),
+		`SELECT COALESCE(faculty_id,'') FROM professors WHERE id = $1`, profID).Scan(&facultyID)
+
+	rows, _ := db.Pool.Query(context.Background(),
+		`SELECT t.id, t.day, t.start_time::text, t.end_time::text,
+		        t.subject_code, COALESCE(s.subject_name,''),
+		        t.faculty_code, t.room_code, t.section, t.semester
+		 FROM timetable t
+		 LEFT JOIN subjects s ON s.subject_code = t.subject_code
+		 WHERE t.faculty_code = $1 AND ($2 = '' OR t.day = $2)
+		 ORDER BY t.start_time`, facultyID, day)
+	defer rows.Close()
+
+	var entries []gin.H
+	for rows.Next() {
+		var id, d, start, end, subCode, subName, facCode, room, sec, sem string
+		rows.Scan(&id, &d, &start, &end, &subCode, &subName, &facCode, &room, &sec, &sem)
+		entries = append(entries, gin.H{
+			"id": id, "day": d, "start_time": start, "end_time": end,
+			"subject_code": subCode, "subject_name": subName,
+			"faculty_code": facCode, "room_code": room, "section": sec, "semester": sem,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"entries": entries})
+}
+
+// GET /professor/sessions/active — resume state after app restart
+func GetProfessorActiveSession(c *gin.Context) {
+	profID, _ := c.Get("user_id")
+	var id, subjectCode, roomCode string
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT id, subject, room_id::text FROM attendance_sessions
+		 WHERE professor_id = $1 AND active = true LIMIT 1`, profID,
+	).Scan(&id, &subjectCode, &roomCode)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"session": nil})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"session": gin.H{"id": id, "subject_code": subjectCode, "room_code": roomCode}})
+}
+
+// GET /professor/sessions — this professor's session history
+func GetProfessorSessionHistory(c *gin.Context) {
+	profID, _ := c.Get("user_id")
+	rows, _ := db.Pool.Query(context.Background(),
+		`SELECT s.id, s.subject, s.start_time, s.end_time,
+		        (SELECT COUNT(*) FROM attendance a WHERE a.session_id = s.id)
+		 FROM attendance_sessions s
+		 WHERE s.professor_id = $1
+		 ORDER BY s.start_time DESC LIMIT 100`, profID)
+	defer rows.Close()
+
+	var sessions []gin.H
+	for rows.Next() {
+		var id, subject string
+		var start time.Time
+		var end *time.Time
+		var count int
+		rows.Scan(&id, &subject, &start, &end, &count)
+		sessions = append(sessions, gin.H{
+			"id": id, "subject_code": subject, "start_time": start, "end_time": end, "attendance_count": count,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"sessions": sessions})
 }

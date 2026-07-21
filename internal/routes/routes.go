@@ -40,7 +40,7 @@ func Setup(r *gin.Engine) {
 
 	// PROFESSOR routes (AUTH + ROLE REQUIRED)
 	professor := r.Group("/")
-	professor.Use(middleware.AuthMiddleware(), middleware.RequireRole("professor", "admin"))
+	professor.Use(middleware.AuthMiddleware(), middleware.RequireRole("professor", "admin", "hod"))
 	{
 		professor.POST("/sessions", handlers.StartSession)
 		professor.GET("/classrooms", handlers.GetClassrooms)
@@ -54,6 +54,13 @@ func Setup(r *gin.Engine) {
 		professor.GET("/sessions/:session_id/students", handlers.GetEligibleStudents)
 		professor.POST("/sessions/:session_id/override", handlers.OverrideAttendance)
 		professor.DELETE("/sessions/:session_id/attendance/:student_id", handlers.RemoveAttendance)
+		professor.GET("/professor/timetable", handlers.GetProfessorTimetable)
+		professor.GET("/professor/sessions/active", handlers.GetProfessorActiveSession)
+		professor.GET("/professor/sessions", handlers.GetProfessorSessions)
+		professor.POST("/professor/change-password", handlers.ChangePasswordProfessor)
+		professor.GET("/professor/subjects", handlers.GetProfessorSubjects)
+		professor.GET("/professor/me", handlers.GetMyProfile)
+
 	}
 
 	// ADMIN routes (admin only)
@@ -106,6 +113,15 @@ func Setup(r *gin.Engine) {
 		admin.POST("/allocations", handlers.CreateAllocation)
 		admin.DELETE("/allocations/:id", handlers.DeleteAllocation)
 	}
+
+	hodRoutes := r.Group("/hod")
+	hodRoutes.Use(middleware.AuthMiddleware(), middleware.RequireRole("hod", "admin"))
+	{
+		hodRoutes.GET("/stats", handlers.GetHODStats)
+		hodRoutes.GET("/faculty", handlers.GetHODFaculty)
+		hodRoutes.GET("/analytics", handlers.GetHODAnalytics)
+	}
+
 	// Legacy public endpoints (Sections list can be public for dropdown)
 	r.GET("/sections", handlers.ListSections)
 }
