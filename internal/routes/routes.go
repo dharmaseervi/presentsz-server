@@ -36,6 +36,7 @@ func Setup(r *gin.Engine) {
 		student.GET("/timetable", handlers.GetTimetable)
 		student.GET("/sessions/active", handlers.GetActiveSession)
 		student.POST("/students/change-password", handlers.ChangePassword)
+		student.GET("/sessions/:session_id/attendance-count", handlers.GetSessionAttendanceCount)
 	}
 
 	// PROFESSOR routes (AUTH + ROLE REQUIRED)

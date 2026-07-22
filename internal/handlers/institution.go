@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/xuri/excelize/v2"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/yourusername/presentsz-server/internal/db"
 )
@@ -61,6 +62,7 @@ func BulkUploadHODs(c *gin.Context) {
 		return
 	}
 
+	adminID, _ := c.Get("user_id")
 	created, skipped, errors := 0, 0, 0
 	var results []gin.H
 
@@ -84,6 +86,7 @@ func BulkUploadHODs(c *gin.Context) {
 			continue
 		}
 
+		// Insert into hods directory table
 		_, err := db.Pool.Exec(context.Background(),
 			`INSERT INTO hods (hod_code, name, department, email, phone, status)
 			 VALUES ($1, $2, $3, $4, $5, $6)
@@ -95,6 +98,40 @@ func BulkUploadHODs(c *gin.Context) {
 			errors++
 			continue
 		}
+
+		// Also create/promote the login-capable professors row, right now
+		loginEmail := email
+		if loginEmail == "" {
+			loginEmail = strings.ToLower(hodCode) + "@presenze.local"
+		}
+
+		var existingID string
+		err = db.Pool.QueryRow(context.Background(),
+			`SELECT id FROM professors WHERE faculty_id = $1`, hodCode,
+		).Scan(&existingID)
+
+		if err != nil { // not found — safe to create
+			hash, hashErr := bcrypt.GenerateFromPassword([]byte(hodCode), bcrypt.DefaultCost)
+			if hashErr != nil {
+				results = append(results, gin.H{"row": i + 2, "code": hodCode, "status": "error", "error": "failed to hash password"})
+				errors++
+				continue
+			}
+			_, err = db.Pool.Exec(context.Background(),
+				`INSERT INTO professors
+				    (name, email, faculty_id, department, role, subject, password_hash,
+				     password_reset_required, password_expires_at, status, created_by)
+				 VALUES ($1, $2, $3, $4, 'hod', '', $5, true, $6, $7, $8)`,
+				name, loginEmail, hodCode, dept, string(hash),
+				time.Now().Add(7*24*time.Hour), status, adminID,
+			)
+			if err != nil {
+				results = append(results, gin.H{"row": i + 2, "code": hodCode, "status": "error", "error": "hod created but login setup failed: " + err.Error()})
+				errors++
+				continue
+			}
+		}
+
 		created++
 		results = append(results, gin.H{"row": i + 2, "code": hodCode, "name": name, "status": "created"})
 	}
@@ -139,20 +176,45 @@ func CreateHOD(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	adminID, _ := c.Get("user_id")
+	hodCode := strings.ToUpper(req.HODCode)
+
 	var id string
 	err := db.Pool.QueryRow(context.Background(),
 		`INSERT INTO hods (hod_code, name, department, email, phone, status)
 		 VALUES ($1,$2,$3,$4,$5,'Active') RETURNING id`,
-		strings.ToUpper(req.HODCode), req.Name, req.Department,
+		hodCode, req.Name, req.Department,
 		nullIfEmpty(req.Email), nullIfEmpty(req.Phone),
 	).Scan(&id)
 	if err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "HOD code may already exist: " + err.Error()})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"message": "HOD created", "id": id})
-}
 
+	// Also create the login-capable professors row immediately
+	loginEmail := req.Email
+	if loginEmail == "" {
+		loginEmail = strings.ToLower(hodCode) + "@presenze.local"
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(hodCode), bcrypt.DefaultCost)
+	if err == nil {
+		db.Pool.Exec(context.Background(),
+			`INSERT INTO professors
+			    (name, email, faculty_id, department, role, subject, password_hash,
+			     password_reset_required, password_expires_at, status, created_by)
+			 VALUES ($1, $2, $3, $4, 'hod', '', $5, true, $6, 'Active', $7)
+			 ON CONFLICT (faculty_id) DO NOTHING`,
+			req.Name, loginEmail, hodCode, req.Department, string(hash),
+			time.Now().Add(7*24*time.Hour), adminID,
+		)
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "HOD created", "id": id,
+		"login_info": fmt.Sprintf("Login with Faculty ID: %s / Password: %s", hodCode, hodCode),
+	})
+}
 func DeleteHOD(c *gin.Context) {
 	id := c.Param("id")
 	db.Pool.Exec(context.Background(), `DELETE FROM hods WHERE id = $1`, id)
