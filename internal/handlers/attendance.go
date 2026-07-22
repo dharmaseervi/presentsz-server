@@ -715,9 +715,10 @@ func GetEligibleStudents(c *gin.Context) {
 		        COALESCE((SELECT a.status FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as status,
 		        COALESCE((SELECT a.marked_by FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as marked_by
 		 FROM students s
+		 JOIN sections sec ON sec.id = s.section_id
 		 JOIN attendance_sessions sess ON sess.id = $1
-		 JOIN classrooms r ON r.id = sess.room_id
-		 WHERE s.year = r.year
+		 WHERE sec.section_letter = sess.section
+		   AND s.semester = sess.semester
 		 ORDER BY s.roll_number`,
 		sessionID,
 	)
