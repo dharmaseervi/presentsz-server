@@ -287,20 +287,25 @@ func GetStudent(c *gin.Context) {
 	studentID := c.Param("id")
 
 	var s struct {
-		ID         string `json:"id"`
-		Name       string `json:"name"`
-		Email      string `json:"email"`
-		Phone      string `json:"phone"`
-		RollNumber string `json:"roll_number"`
-		Department string `json:"department"`
-		Year       string `json:"year"`
-		Semester   string `json:"semester"`
+		ID         string  `json:"id"`
+		Name       string  `json:"name"`
+		Email      string  `json:"email"`
+		Phone      string  `json:"phone"`
+		RollNumber string  `json:"roll_number"`
+		Department string  `json:"department"`
+		Year       string  `json:"year"`
+		Semester   string  `json:"semester"`
+		Section    *string `json:"section"`
 	}
 
 	err := db.Pool.QueryRow(context.Background(),
-		`SELECT id, name, email, phone, roll_number, department, year, semester
-		 FROM students WHERE id = $1`, studentID,
-	).Scan(&s.ID, &s.Name, &s.Email, &s.Phone, &s.RollNumber, &s.Department, &s.Year, &s.Semester)
+		`SELECT s.id, s.name, s.email, s.phone, s.roll_number,
+		        s.department, s.year, s.semester, sec.section_letter
+		 FROM students s
+		 LEFT JOIN sections sec ON sec.id = s.section_id
+		 WHERE s.id = $1`, studentID,
+	).Scan(&s.ID, &s.Name, &s.Email, &s.Phone, &s.RollNumber,
+		&s.Department, &s.Year, &s.Semester, &s.Section)
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "student not found"})
@@ -627,9 +632,14 @@ func GetClassroomCount(c *gin.Context) {
 
 	var count int
 	err := db.Pool.QueryRow(context.Background(),
-		`SELECT COUNT(*) FROM students s
-         JOIN classrooms r ON r.year = s.year
-         WHERE r.room_name = $1`,
+		`SELECT COUNT(DISTINCT s.id)
+		 FROM students s
+		 JOIN sections sec ON sec.id = s.section_id
+		 JOIN attendance_sessions asn ON asn.section = sec.section_letter
+		   AND asn.semester = s.semester
+		   AND asn.active = true
+		 JOIN classrooms r ON r.id = asn.room_id
+		 WHERE r.room_name = $1`,
 		roomName,
 	).Scan(&count)
 
@@ -889,4 +899,22 @@ func GetMyProfile(c *gin.Context) {
 		"name": name, "email": email, "role": role, "status": status,
 		"faculty_id": facultyID, "department": department, "designation": designation,
 	})
+}
+
+// GET /sessions/:session_id/attendance-count
+// Student-safe — returns only the count, not who specifically has marked
+func GetSessionAttendanceCount(c *gin.Context) {
+	sessionID := c.Param("session_id")
+
+	var count int
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM attendance WHERE session_id = $1`,
+		sessionID,
+	).Scan(&count)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch count"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"count": count})
 }
