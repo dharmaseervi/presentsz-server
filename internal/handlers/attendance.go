@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/yourusername/presentsz-server/cmd/reports"
 	"github.com/yourusername/presentsz-server/internal/db"
 )
 
@@ -918,4 +919,139 @@ func GetSessionAttendanceCount(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"count": count})
+}
+
+// GET /professor/reports/export?subject_code=&start_date=&end_date=
+func ExportAttendanceReport(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	role, _ := c.Get("role")
+	subjectCode := c.Query("subject_code")
+	startDate := c.Query("start_date")
+	endDate := c.Query("end_date")
+
+	if startDate == "" || endDate == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "start_date and end_date are required (YYYY-MM-DD)"})
+		return
+	}
+
+	var facultyID, department string
+	db.Pool.QueryRow(context.Background(),
+		`SELECT COALESCE(faculty_id,''), COALESCE(department,'') FROM professors WHERE id = $1`, userID,
+	).Scan(&facultyID, &department)
+
+	deptScope := ""
+	if role == "hod" || role == "admin" {
+		deptScope = department
+	}
+
+	f, err := reports.BuildAttendanceReport(userID.(string), deptScope, facultyID, subjectCode, startDate, endDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	scopeLabel := "professor"
+	if deptScope != "" {
+		scopeLabel = "department"
+	}
+	filename := fmt.Sprintf("attendance_%s_%s_%s_to_%s.xlsx", scopeLabel, facultyID, startDate, endDate)
+	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Header("Content-Disposition", "attachment; filename="+filename)
+
+	if err := f.Write(c.Writer); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write file"})
+		return
+	}
+}
+
+// POST /professor/reports/subscribe
+func SubscribeToReport(c *gin.Context) {
+	professorID, _ := c.Get("user_id")
+
+	var req struct {
+		SubjectCode string `json:"subject_code"` // "" = all subjects
+		Frequency   string `json:"frequency" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Frequency != "weekly" && req.Frequency != "monthly" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "frequency must be 'weekly' or 'monthly'"})
+		return
+	}
+
+	var subjectCode interface{} = nil
+	if req.SubjectCode != "" {
+		subjectCode = strings.ToUpper(req.SubjectCode)
+	}
+
+	var id string
+	err := db.Pool.QueryRow(context.Background(),
+		`INSERT INTO report_subscriptions (professor_id, subject_code, frequency, enabled)
+		 VALUES ($1, $2, $3, true)
+		 ON CONFLICT (professor_id, subject_code, frequency)
+		 DO UPDATE SET enabled = true
+		 RETURNING id`,
+		professorID, subjectCode, req.Frequency,
+	).Scan(&id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "subscribed", "id": id})
+}
+
+// GET /professor/reports/subscriptions
+func ListReportSubscriptions(c *gin.Context) {
+	professorID, _ := c.Get("user_id")
+
+	rows, err := db.Pool.Query(context.Background(),
+		`SELECT id, COALESCE(subject_code, ''), frequency, enabled, last_sent_at
+		 FROM report_subscriptions WHERE professor_id = $1 ORDER BY created_at DESC`,
+		professorID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var subs []gin.H
+	for rows.Next() {
+		var id, subjectCode, frequency string
+		var enabled bool
+		var lastSent *time.Time
+		rows.Scan(&id, &subjectCode, &frequency, &enabled, &lastSent)
+		entry := gin.H{"id": id, "subject_code": subjectCode, "frequency": frequency, "enabled": enabled}
+		if lastSent != nil {
+			entry["last_sent_at"] = lastSent.Format(time.RFC3339)
+		}
+		subs = append(subs, entry)
+	}
+	if subs == nil {
+		subs = []gin.H{}
+	}
+	c.JSON(http.StatusOK, gin.H{"subscriptions": subs})
+}
+
+// DELETE /professor/reports/subscriptions/:id
+func UnsubscribeFromReport(c *gin.Context) {
+	professorID, _ := c.Get("user_id")
+	subID := c.Param("id")
+
+	result, err := db.Pool.Exec(context.Background(),
+		`DELETE FROM report_subscriptions WHERE id = $1 AND professor_id = $2`,
+		subID, professorID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "unsubscribed"})
 }

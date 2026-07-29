@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/yourusername/presentsz-server/internal/handlers"
 	"github.com/yourusername/presentsz-server/internal/middleware"
@@ -11,6 +13,10 @@ func Setup(r *gin.Engine) {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
+
+	var forgotPasswordLimiter = middleware.NewRateLimiter(3, 15*time.Minute) // 3 requests / 15 min / IP
+	var resetOtpLimiter = middleware.NewRateLimiter(8, 15*time.Minute)       // 8 attempts / 15 min / IP
+	var ForgotPasswordProfLimiter = middleware.NewRateLimiter(3, 15*time.Minute)
 
 	r.GET("/esp32/sessions/active", handlers.GetESP32ActiveSession)
 	r.POST("/attendance/ble", handlers.MarkAttendanceBLE) // ← Already public
@@ -61,6 +67,10 @@ func Setup(r *gin.Engine) {
 		professor.POST("/professor/change-password", handlers.ChangePasswordProfessor)
 		professor.GET("/professor/subjects", handlers.GetProfessorSubjects)
 		professor.GET("/professor/me", handlers.GetMyProfile)
+		professor.GET("/professor/reports/export", handlers.ExportAttendanceReport)
+		professor.POST("/professor/reports/subscribe", handlers.SubscribeToReport)
+		professor.GET("/professor/reports/subscriptions", handlers.ListReportSubscriptions)
+		professor.DELETE("/professor/reports/subscriptions/:id", handlers.UnsubscribeFromReport)
 
 	}
 
@@ -125,4 +135,8 @@ func Setup(r *gin.Engine) {
 
 	// Legacy public endpoints (Sections list can be public for dropdown)
 	r.GET("/sections", handlers.ListSections)
+	r.POST("/students/forgot-password", forgotPasswordLimiter.Middleware(), handlers.ForgotPassword)
+	r.POST("/students/reset-with-otp", resetOtpLimiter.Middleware(), handlers.ResetWithOTP)
+	r.POST("/professor/forgot-password", ForgotPasswordProfLimiter.Middleware(), handlers.ForgotPasswordProfessor)
+	r.POST("/professor/reset-with-otp", handlers.ResetProfessorWithOTP)
 }

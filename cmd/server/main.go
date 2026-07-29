@@ -7,11 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/yourusername/presentsz-server/cmd/reports"
 	"github.com/yourusername/presentsz-server/internal/db"
+	"github.com/yourusername/presentsz-server/internal/email"
 	"github.com/yourusername/presentsz-server/internal/routes"
 )
 
@@ -196,6 +199,115 @@ func startScheduler() {
 	}()
 	fmt.Println("✓ Session scheduler started")
 }
+func runReportScheduler() {
+	now := time.Now()
+
+	rows, err := db.Pool.Query(context.Background(),
+		`SELECT rs.id, rs.professor_id, COALESCE(rs.subject_code, ''), rs.frequency, rs.last_sent_at,
+            p.name, p.email, p.faculty_id, COALESCE(p.role,'professor'), COALESCE(p.department,'')
+     FROM report_subscriptions rs
+     JOIN professors p ON p.id = rs.professor_id
+     WHERE rs.enabled = true`,
+	)
+	if err != nil {
+		log.Println("Report scheduler query error:", err)
+		return
+	}
+	defer rows.Close()
+
+	type sub struct {
+		id, professorID, subjectCode, frequency, name, email, facultyID string
+		role, department                                                string
+		lastSent                                                        *time.Time
+	}
+	var subs []sub
+	for rows.Next() {
+		var s sub
+		rows.Scan(&s.id, &s.professorID, &s.subjectCode, &s.frequency, &s.lastSent,
+			&s.name, &s.email, &s.facultyID, &s.role, &s.department)
+		subs = append(subs, s)
+	}
+	rows.Close()
+
+	for _, s := range subs {
+		due, periodStart, periodEnd, periodLabel := isReportDue(s.frequency, s.lastSent, now)
+		if !due {
+			continue
+		}
+
+		if strings.HasSuffix(strings.ToLower(s.email), "@presenze.local") {
+			// No real email on file — skip silently, don't retry every tick.
+			db.Pool.Exec(context.Background(),
+				`UPDATE report_subscriptions SET last_sent_at = $1 WHERE id = $2`, now, s.id)
+			continue
+		}
+
+		deptScope := ""
+		if s.role == "hod" || s.role == "admin" {
+			deptScope = s.department
+		}
+
+		f, err := reports.BuildAttendanceReport(s.professorID, deptScope, s.facultyID, s.subjectCode, periodStart, periodEnd)
+		if err != nil {
+			log.Printf("Report scheduler: failed to build report for %s: %v\n", s.facultyID, err)
+			continue
+		}
+
+		data, err := reports.ToBytes(f)
+		if err != nil {
+			log.Printf("Report scheduler: failed to serialize report for %s: %v\n", s.facultyID, err)
+			continue
+		}
+
+		subjectLabel := s.subjectCode
+		if subjectLabel == "" {
+			subjectLabel = "All subjects"
+		}
+		filename := fmt.Sprintf("attendance_%s_%s.xlsx", s.facultyID, periodEnd)
+
+		if err := email.SendReportEmail(s.email, s.name, subjectLabel, periodLabel, data, filename); err != nil {
+			log.Printf("Report scheduler: failed to email report to %s: %v\n", s.email, err)
+			continue
+		}
+
+		db.Pool.Exec(context.Background(),
+			`UPDATE report_subscriptions SET last_sent_at = $1 WHERE id = $2`, now, s.id)
+		log.Printf("✓ Sent %s report to %s (%s)\n", s.frequency, s.facultyID, subjectLabel)
+	}
+}
+
+// isReportDue decides whether a subscription's next report is due right now,
+// and returns the exact period it should cover.
+func isReportDue(frequency string, lastSent *time.Time, now time.Time) (due bool, periodStart, periodEnd, label string) {
+	switch frequency {
+	case "weekly":
+		// Due once per week; if never sent, cover the last 7 days.
+		if lastSent == nil || now.Sub(*lastSent) >= 7*24*time.Hour {
+			start := now.AddDate(0, 0, -7)
+			return true, start.Format("2006-01-02"), now.Format("2006-01-02"), "Last 7 days"
+		}
+	case "monthly":
+		if lastSent == nil || now.Sub(*lastSent) >= 30*24*time.Hour {
+			start := now.AddDate(0, 0, -30)
+			return true, start.Format("2006-01-02"), now.Format("2006-01-02"), "Last 30 days"
+		}
+	}
+	return false, "", "", ""
+}
+
+func startReportScheduler() {
+	// Run immediately on startup — catches up on any reports that were
+	// due while the server was down or being redeployed.
+	runReportScheduler()
+
+	ticker := time.NewTicker(1 * time.Hour)
+	go func() {
+		for range ticker.C {
+			runReportScheduler()
+		}
+	}()
+	fmt.Println("✓ Report scheduler started")
+}
 
 func main() {
 	if err := godotenv.Load(); err != nil {
@@ -210,9 +322,11 @@ func main() {
 	if err := runMigrations(); err != nil {
 		log.Fatalf("Migration failed: %v", err)
 	}
-
+	email.Init()
 	// Start background scheduler
 	startScheduler()
+
+	startReportScheduler()
 
 	r := gin.Default()
 
