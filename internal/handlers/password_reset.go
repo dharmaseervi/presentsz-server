@@ -3,16 +3,20 @@ package handlers
 import (
 	"context"
 	"crypto/rand"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/yourusername/presentsz-server/internal/db"
 	"github.com/yourusername/presentsz-server/internal/email"
+	"github.com/yourusername/presentsz-server/internal/middleware"
 )
 
+var otpAttemptLimiter = middleware.NewRateLimiter(5, 10*time.Minute) // 5 guesses / 10 min / USN
 func generateOTP() string {
 	digits := "0123456789"
 	b := make([]byte, 6)
@@ -88,6 +92,7 @@ func ResetWithOTP(c *gin.Context) {
 		OTP         string `json:"otp" binding:"required"`
 		NewPassword string `json:"new_password" binding:"required,min=6"`
 	}
+
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -95,6 +100,12 @@ func ResetWithOTP(c *gin.Context) {
 
 	usn := strings.ToUpper(strings.TrimSpace(req.USN))
 
+	if !otpAttemptLimiter.Allow("otp:" + usn) {
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error": "Too many attempts for this account. Please request a new code and try again later.",
+		})
+		return
+	}
 	var studentID string
 	err := db.Pool.QueryRow(context.Background(),
 		`SELECT id FROM students WHERE roll_number = $1`, usn,
@@ -119,12 +130,16 @@ func ResetWithOTP(c *gin.Context) {
 	var matchedID string
 	for rows.Next() {
 		var id, hash string
-		rows.Scan(&id, &hash)
+		if err := rows.Scan(&id, &hash); err != nil {
+			log.Println("ResetWithOTP scan error:", err)
+			continue
+		}
 		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.OTP)) == nil {
 			matchedID = id
 			break
 		}
 	}
+	rows.Close()
 	rows.Close()
 
 	if matchedID == "" {

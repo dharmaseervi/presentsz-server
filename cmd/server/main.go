@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getsentry/sentry-go"
+	sentrygin "github.com/getsentry/sentry-go/gin"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"github.com/yourusername/presentsz-server/cmd/reports"
@@ -314,6 +316,16 @@ func main() {
 		log.Println("No .env file found, using environment variables")
 	}
 
+	if err := sentry.Init(sentry.ClientOptions{
+		Dsn: os.Getenv("SENTRY_DSN"),
+	}); err != nil {
+		fmt.Printf("Sentry initialization failed: %v\n", err)
+	}
+
+	fmt.Println("Sentry DSN loaded:", os.Getenv("SENTRY_DSN") != "")
+
+	defer sentry.Flush(2 * time.Second)
+
 	if err := db.Connect(); err != nil {
 		log.Fatalf("DB connection failed: %v", err)
 	}
@@ -329,6 +341,8 @@ func main() {
 	startReportScheduler()
 
 	r := gin.Default()
+
+	r.Use(sentrygin.New(sentrygin.Options{}))
 
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")

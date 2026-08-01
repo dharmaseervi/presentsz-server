@@ -14,6 +14,10 @@ func Setup(r *gin.Engine) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
+	r.GET("/sentry-test", func(c *gin.Context) {
+		panic("test panic — confirming Sentry capture works")
+	})
+
 	var forgotPasswordLimiter = middleware.NewRateLimiter(3, 15*time.Minute) // 3 requests / 15 min / IP
 	var resetOtpLimiter = middleware.NewRateLimiter(8, 15*time.Minute)       // 8 attempts / 15 min / IP
 	var ForgotPasswordProfLimiter = middleware.NewRateLimiter(3, 15*time.Minute)
@@ -36,13 +40,14 @@ func Setup(r *gin.Engine) {
 	{
 		student.POST("/attendance/mark", handlers.MarkAttendance)
 		student.GET("/students/:id", handlers.GetStudent)
-		student.POST("/students/:id/register-ble", handlers.RegisterBLE)
 		student.GET("/students/:id/attendance", handlers.GetStudentAttendance)
 		student.GET("/classrooms/:room_name/count", handlers.GetClassroomCount)
 		student.GET("/timetable", handlers.GetTimetable)
 		student.GET("/sessions/active", handlers.GetActiveSession)
 		student.POST("/students/change-password", handlers.ChangePassword)
 		student.GET("/sessions/:session_id/attendance-count", handlers.GetSessionAttendanceCount)
+		student.PUT("/students/request-email-update", handlers.RequestEmailUpdate)
+
 	}
 
 	// PROFESSOR routes (AUTH + ROLE REQUIRED)
@@ -123,6 +128,10 @@ func Setup(r *gin.Engine) {
 		admin.GET("/allocations", handlers.ListAllocations)
 		admin.POST("/allocations", handlers.CreateAllocation)
 		admin.DELETE("/allocations/:id", handlers.DeleteAllocation)
+
+		admin.GET("/students/pending-emails", handlers.ListPendingEmailChanges)
+		admin.POST("/students/:id/approve-email", handlers.ApproveEmailChange)
+		admin.POST("/students/:id/reject-email", handlers.RejectEmailChange)
 	}
 
 	hodRoutes := r.Group("/hod")

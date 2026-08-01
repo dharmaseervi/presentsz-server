@@ -40,9 +40,14 @@ func ListSections(c *gin.Context) {
 	var sections []Section
 	for rows.Next() {
 		var s Section
-		rows.Scan(&s.ID, &s.SectionCode, &s.Department, &s.Year, &s.SectionLetter,
-			&s.Capacity, &s.AcademicYear, &s.StudentCount)
+		if err := rows.Scan(&s.ID, &s.SectionCode, &s.Department, &s.Year, &s.SectionLetter,
+			&s.Capacity, &s.AcademicYear, &s.StudentCount); err != nil {
+			continue
+		}
 		sections = append(sections, s)
+	}
+	if sections == nil {
+		sections = []Section{}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

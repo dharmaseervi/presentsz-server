@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/gin-gonic/gin"
 	"github.com/yourusername/presentsz-server/internal/db"
 )
@@ -26,11 +27,12 @@ func GetHODStats(c *gin.Context) {
 
 	// Total faculty in this department
 	var facultyCount int
-	db.Pool.QueryRow(context.Background(),
-		`SELECT COUNT(*) FROM professors
-		 WHERE department = $1 AND COALESCE(role,'professor') IN ('professor','hod')`,
+	if err := db.Pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM professors WHERE department = $1 AND COALESCE(role,'professor') IN ('professor','hod')`,
 		department,
-	).Scan(&facultyCount)
+	).Scan(&facultyCount); err != nil {
+		sentry.CaptureException(err)
+	}
 
 	// Total students in this department
 	var studentCount int
@@ -95,7 +97,9 @@ func GetHODStats(c *gin.Context) {
 		var name, facID string
 		var sessionCount int
 		var avgFacRate float64
-		rows.Scan(&name, &facID, &sessionCount, &avgFacRate)
+		if err := rows.Scan(&name, &facID, &sessionCount, &avgFacRate); err != nil {
+			continue
+		}
 		faculty = append(faculty, gin.H{
 			"name": name, "faculty_id": facID,
 			"session_count": sessionCount, "avg_attendance_rate": avgFacRate,
@@ -272,7 +276,9 @@ func GetHODAnalytics(c *gin.Context) {
 	var allSubjects []subjectRate
 	for rows.Next() {
 		var sr subjectRate
-		rows.Scan(&sr.Subject, &sr.Rate)
+		if err := rows.Scan(&sr.Subject, &sr.Rate); err != nil {
+			continue
+		}
 		allSubjects = append(allSubjects, sr)
 	}
 

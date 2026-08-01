@@ -15,59 +15,59 @@ import (
 
 // POST /students/:id/register-ble
 // This endpoint is called ONCE from the mobile app on first login
-func RegisterBLE(c *gin.Context) {
-	studentID, _ := c.Get("user_id")
+// func RegisterBLE(c *gin.Context) {
+// 	studentID, _ := c.Get("user_id")
 
-	var req struct {
-		BLEUUID  string `json:"ble_uuid" binding:"required"`
-		DeviceID string `json:"device_id" binding:"required"`
-	}
+// 	var req struct {
+// 		BLEUUID  string `json:"ble_uuid" binding:"required"`
+// 		DeviceID string `json:"device_id" binding:"required"`
+// 	}
 
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+// 	if err := c.ShouldBindJSON(&req); err != nil {
+// 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+// 		return
+// 	}
 
-	// Check if student already has BLE registered
-	var existingUUID *string
-	err := db.Pool.QueryRow(context.Background(),
-		`SELECT ble_uuid FROM students WHERE id = $1`, studentID,
-	).Scan(&existingUUID)
+// 	// Check if student already has BLE registered
+// 	var existingUUID *string
+// 	err := db.Pool.QueryRow(context.Background(),
+// 		`SELECT ble_uuid FROM students WHERE id = $1`, studentID,
+// 	).Scan(&existingUUID)
 
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "student not found"})
-		return
-	}
+// 	if err != nil {
+// 		c.JSON(http.StatusNotFound, gin.H{"error": "student not found"})
+// 		return
+// 	}
 
-	// If already registered, don't allow re-registration (security)
-	if existingUUID != nil && *existingUUID != "" {
-		c.JSON(http.StatusConflict, gin.H{
-			"error":   "BLE device already registered for this student",
-			"message": "Contact admin to reset device",
-		})
-		return
-	}
+// 	// If already registered, don't allow re-registration (security)
+// 	if existingUUID != nil && *existingUUID != "" {
+// 		c.JSON(http.StatusConflict, gin.H{
+// 			"error":   "BLE device already registered for this student",
+// 			"message": "Contact admin to reset device",
+// 		})
+// 		return
+// 	}
 
-	// Update
-	_, err = db.Pool.Exec(context.Background(),
-		`UPDATE students 
-         SET ble_uuid = $1, device_id = $2
-         WHERE id = $3`,
-		req.BLEUUID, req.DeviceID, studentID,
-	)
+// 	// Update
+// 	_, err = db.Pool.Exec(context.Background(),
+// 		`UPDATE students
+//          SET ble_uuid = $1, device_id = $2
+//          WHERE id = $3`,
+// 		req.BLEUUID, req.DeviceID, studentID,
+// 	)
 
-	if err != nil {
-		// If UUID unique constraint fails, someone else has this UUID
-		c.JSON(http.StatusConflict, gin.H{"error": "device UUID already in use"})
-		return
-	}
+// 	if err != nil {
+// 		// If UUID unique constraint fails, someone else has this UUID
+// 		c.JSON(http.StatusConflict, gin.H{"error": "device UUID already in use"})
+// 		return
+// 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":   "device registered successfully",
-		"ble_uuid":  req.BLEUUID,
-		"device_id": req.DeviceID,
-	})
-}
+// 	c.JSON(http.StatusOK, gin.H{
+// 		"message":   "device registered successfully",
+// 		"ble_uuid":  req.BLEUUID,
+// 		"device_id": req.DeviceID,
+// 	})
+// }
 
 func RegisterProfessor(c *gin.Context) {
 	var req struct {
@@ -113,6 +113,8 @@ func LoginStudent(c *gin.Context) {
 	var req struct {
 		USN      string `json:"usn" binding:"required"`
 		Password string `json:"password" binding:"required"`
+		BLEUUID  string `json:"ble_uuid"`
+		DeviceID string `json:"device_id"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -126,17 +128,18 @@ func LoginStudent(c *gin.Context) {
 		passwordResetRequired                                   bool
 		passwordExpiresAt                                       *time.Time
 		sectionID                                               *string
+		existingBLEUUID                                         *string
 	)
 
 	err := db.Pool.QueryRow(context.Background(),
 		`SELECT id, name, email, password_hash, roll_number, 
 		        year, semester, department, section_id,
-		        password_reset_required, password_expires_at
+		        password_reset_required, password_expires_at, ble_uuid
 		 FROM students WHERE roll_number = $1`,
 		strings.ToUpper(req.USN),
 	).Scan(&id, &name, &email, &passwordHash, &rollNumber,
 		&year, &semester, &department, &sectionID,
-		&passwordResetRequired, &passwordExpiresAt)
+		&passwordResetRequired, &passwordExpiresAt, &existingBLEUUID)
 
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
@@ -157,6 +160,26 @@ func LoginStudent(c *gin.Context) {
 			"message":                 "Your temporary password has expired. Contact admin to reset.",
 		})
 		return
+	}
+
+	// Device binding check — password was correct, but this may not be the
+	// student's registered device.
+	if req.BLEUUID != "" {
+		if existingBLEUUID == nil || *existingBLEUUID == "" {
+			// First login ever, or device was reset by admin — bind this device now.
+			db.Pool.Exec(context.Background(),
+				`UPDATE students SET ble_uuid = $1, device_id = $2 WHERE id = $3`,
+				req.BLEUUID, req.DeviceID, id,
+			)
+		} else if *existingBLEUUID != req.BLEUUID {
+			// A different device is already bound to this account.
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "device_mismatch",
+				"message": "This account is registered to another device. Contact your administrator to reset your device.",
+			})
+			return
+		}
+		// else: existingBLEUUID == req.BLEUUID — same device, proceed normally
 	}
 
 	// Get section details

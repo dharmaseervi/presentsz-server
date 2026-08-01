@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -123,12 +124,17 @@ func ResetProfessorWithOTP(c *gin.Context) {
 	var matchedID string
 	for rows.Next() {
 		var id, hash string
-		rows.Scan(&id, &hash)
+		if err := rows.Scan(&id, &hash); err != nil {
+			log.Println("ResetProfessorWithOTP scan error:", err)
+			continue
+		}
 		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.OTP)) == nil {
 			matchedID = id
 			break
 		}
 	}
+	rows.Close()
+
 	rows.Close()
 
 	if matchedID == "" {

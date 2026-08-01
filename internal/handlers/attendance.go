@@ -251,7 +251,7 @@ func GetSessionAttendance(c *gin.Context) {
 	sessionID := c.Param("session_id")
 
 	rows, err := db.Pool.Query(context.Background(),
-		`SELECT s.name, s.roll_number, s.department, a.status, a.marked_at, a.marked_by
+		`SELECT s.name, s.roll_number, s.department, a.status, a.marked_at::text, a.marked_by
 		 FROM attendance a
 		 JOIN students s ON s.id = a.student_id
 		 WHERE a.session_id = $1
@@ -276,7 +276,9 @@ func GetSessionAttendance(c *gin.Context) {
 	var records []Record
 	for rows.Next() {
 		var r Record
-		rows.Scan(&r.Name, &r.RollNumber, &r.Department, &r.Status, &r.MarkedAt, &r.MarkedBy)
+		if err := rows.Scan(&r.Name, &r.RollNumber, &r.Department, &r.Status, &r.MarkedAt, &r.MarkedBy); err != nil {
+			continue
+		}
 		records = append(records, r)
 	}
 
@@ -329,9 +331,12 @@ func GetClassrooms(c *gin.Context) {
 		Year     string `json:"year"`
 	}
 	var rooms []Room
+
 	for rows.Next() {
 		var r Room
-		rows.Scan(&r.ID, &r.RoomName, &r.RoomCode, &r.Year)
+		if err := rows.Scan(&r.ID, &r.RoomName, &r.RoomCode, &r.Year); err != nil {
+			continue
+		}
 		rooms = append(rooms, r)
 	}
 	if rooms == nil {
@@ -456,12 +461,13 @@ func GetStudentAttendance(c *gin.Context) {
 	var records []Record
 	for rows.Next() {
 		var r Record
-		var markedAt time.Time // ← scan as time.Time
-		rows.Scan(&r.SessionID, &r.Subject, &r.RoomName, &r.Status, &markedAt)
-		r.MarkedAt = markedAt.Format(time.RFC3339) // ← format as RFC3339
+		var markedAt time.Time
+		if err := rows.Scan(&r.SessionID, &r.Subject, &r.RoomName, &r.Status, &markedAt); err != nil {
+			continue
+		}
+		r.MarkedAt = markedAt.Format(time.RFC3339)
 		records = append(records, r)
 	}
-
 	if records == nil {
 		records = []Record{}
 	}
@@ -689,8 +695,9 @@ func GetProfessorSessions(c *gin.Context) {
 		var s Session
 		var startTime time.Time
 		var endTime *time.Time
-		rows.Scan(&s.ID, &s.Subject, &s.RoomName, &s.Active,
-			&startTime, &endTime, &s.AttendanceCount)
+		if err := rows.Scan(&s.ID, &s.Subject, &s.RoomName, &s.Active, &startTime, &endTime, &s.AttendanceCount); err != nil {
+			continue
+		}
 		s.StartTime = startTime.Format(time.RFC3339)
 		if endTime != nil {
 			t := endTime.Format(time.RFC3339)
@@ -707,6 +714,7 @@ func GetProfessorSessions(c *gin.Context) {
 
 // GET /sessions/:session_id/students
 // Returns all students eligible for this session (matched by year)
+// Returns all students eligible for this session (matched by section + semester)
 func GetEligibleStudents(c *gin.Context) {
 	sessionID := c.Param("session_id")
 
@@ -714,7 +722,8 @@ func GetEligibleStudents(c *gin.Context) {
 		`SELECT s.id, s.name, s.roll_number, s.department,
 		        EXISTS(SELECT 1 FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id) as marked,
 		        COALESCE((SELECT a.status FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as status,
-		        COALESCE((SELECT a.marked_by FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as marked_by
+		        COALESCE((SELECT a.marked_by FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as marked_by,
+		        (SELECT a.marked_at::text FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id) as marked_at
 		 FROM students s
 		 JOIN sections sec ON sec.id = s.section_id
 		 JOIN attendance_sessions sess ON sess.id = $1
@@ -730,21 +739,29 @@ func GetEligibleStudents(c *gin.Context) {
 	defer rows.Close()
 
 	type Student struct {
-		ID         string `json:"id"`
-		Name       string `json:"name"`
-		RollNumber string `json:"roll_number"`
-		Department string `json:"department"`
-		Marked     bool   `json:"marked"`
-		Status     string `json:"status"`
-		MarkedBy   string `json:"marked_by"`
+		ID         string  `json:"id"`
+		Name       string  `json:"name"`
+		RollNumber string  `json:"roll_number"`
+		Department string  `json:"department"`
+		Marked     bool    `json:"marked"`
+		Status     string  `json:"status"`
+		MarkedBy   string  `json:"marked_by"`
+		MarkedAt   *string `json:"marked_at"`
 	}
 
 	var students []Student
 	for rows.Next() {
 		var s Student
-		rows.Scan(&s.ID, &s.Name, &s.RollNumber, &s.Department, &s.Marked, &s.Status, &s.MarkedBy)
+		if err := rows.Scan(&s.ID, &s.Name, &s.RollNumber, &s.Department, &s.Marked, &s.Status, &s.MarkedBy, &s.MarkedAt); err != nil {
+			log.Println("GetEligibleStudents scan error:", err)
+			continue
+		}
 		students = append(students, s)
 	}
+	if err := rows.Err(); err != nil {
+		log.Println("GetEligibleStudents rows iteration error:", err)
+	}
+
 	if students == nil {
 		students = []Student{}
 	}
@@ -870,7 +887,9 @@ func GetProfessorSubjects(c *gin.Context) {
 	var subjects []gin.H
 	for rows.Next() {
 		var code, name, section, sem string
-		rows.Scan(&code, &name, &section, &sem)
+		if err := rows.Scan(&code, &name, &section, &sem); err != nil {
+			continue
+		}
 		subjects = append(subjects, gin.H{
 			"subject_code": code, "subject_name": name, "section": section, "semester": sem,
 		})
@@ -935,10 +954,12 @@ func ExportAttendanceReport(c *gin.Context) {
 	}
 
 	var facultyID, department string
-	db.Pool.QueryRow(context.Background(),
+	if err := db.Pool.QueryRow(context.Background(),
 		`SELECT COALESCE(faculty_id,''), COALESCE(department,'') FROM professors WHERE id = $1`, userID,
-	).Scan(&facultyID, &department)
-
+	).Scan(&facultyID, &department); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load professor profile"})
+		return
+	}
 	deptScope := ""
 	if role == "hod" || role == "admin" {
 		deptScope = department
@@ -1023,7 +1044,9 @@ func ListReportSubscriptions(c *gin.Context) {
 		var id, subjectCode, frequency string
 		var enabled bool
 		var lastSent *time.Time
-		rows.Scan(&id, &subjectCode, &frequency, &enabled, &lastSent)
+		if err := rows.Scan(&id, &subjectCode, &frequency, &enabled, &lastSent); err != nil {
+			continue
+		}
 		entry := gin.H{"id": id, "subject_code": subjectCode, "frequency": frequency, "enabled": enabled}
 		if lastSent != nil {
 			entry["last_sent_at"] = lastSent.Format(time.RFC3339)
@@ -1054,4 +1077,115 @@ func UnsubscribeFromReport(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "unsubscribed"})
+}
+
+// PUT /students/request-email-update
+func RequestEmailUpdate(c *gin.Context) {
+	studentID, _ := c.Get("user_id")
+
+	var req struct {
+		Email string `json:"email" binding:"required,email"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "please enter a valid email address"})
+		return
+	}
+
+	newEmail := strings.ToLower(strings.TrimSpace(req.Email))
+
+	if strings.HasSuffix(newEmail, "@presenze.local") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "please enter a real email address"})
+		return
+	}
+
+	var existingID string
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT id FROM students WHERE email = $1 AND id != $2`, newEmail, studentID,
+	).Scan(&existingID)
+	if err == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "that email is already in use by another account"})
+		return
+	}
+
+	_, err = db.Pool.Exec(context.Background(),
+		`UPDATE students SET pending_email = $1, pending_email_requested_at = NOW() WHERE id = $2`,
+		newEmail, studentID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to submit request"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Submitted — an admin will review it shortly.", "pending_email": newEmail})
+}
+
+// GET /admin/students/pending-emails
+func ListPendingEmailChanges(c *gin.Context) {
+	rows, err := db.Pool.Query(context.Background(),
+		`SELECT id, name, roll_number, email, pending_email, pending_email_requested_at
+		 FROM students WHERE pending_email IS NOT NULL
+		 ORDER BY pending_email_requested_at ASC`,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var list []gin.H
+	for rows.Next() {
+		var id, name, roll, currentEmail, pendingEmail string
+		var requestedAt time.Time
+		if err := rows.Scan(&id, &name, &roll, &currentEmail, &pendingEmail, &requestedAt); err != nil {
+			continue
+		}
+		list = append(list, gin.H{
+			"id": id, "name": name, "roll_number": roll,
+			"current_email": currentEmail, "pending_email": pendingEmail,
+			"requested_at": requestedAt.Format(time.RFC3339),
+		})
+	}
+	if list == nil {
+		list = []gin.H{}
+	}
+	c.JSON(http.StatusOK, gin.H{"pending": list})
+}
+
+// POST /admin/students/:id/approve-email
+func ApproveEmailChange(c *gin.Context) {
+	studentID := c.Param("id")
+
+	var pendingEmail string
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT pending_email FROM students WHERE id = $1`, studentID,
+	).Scan(&pendingEmail)
+	if err != nil || pendingEmail == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no pending email change for this student"})
+		return
+	}
+
+	_, err = db.Pool.Exec(context.Background(),
+		`UPDATE students SET email = $1, pending_email = NULL, pending_email_requested_at = NULL WHERE id = $2`,
+		pendingEmail, studentID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to approve"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "email updated", "email": pendingEmail})
+}
+
+// POST /admin/students/:id/reject-email
+func RejectEmailChange(c *gin.Context) {
+	studentID := c.Param("id")
+
+	_, err := db.Pool.Exec(context.Background(),
+		`UPDATE students SET pending_email = NULL, pending_email_requested_at = NULL WHERE id = $1`,
+		studentID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reject"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "request rejected"})
 }

@@ -155,7 +155,9 @@ func ListHODs(c *gin.Context) {
 	var list []gin.H
 	for rows.Next() {
 		var id, code, name, dept, email, phone, status string
-		rows.Scan(&id, &code, &name, &dept, &email, &phone, &status)
+		if err := rows.Scan(&id, &code, &name, &dept, &email, &phone, &status); err != nil {
+			continue
+		}
 		list = append(list, gin.H{
 			"id": id, "hod_code": code, "name": name, "department": dept,
 			"email": email, "phone": phone, "status": status,
@@ -462,7 +464,9 @@ func ListClassrooms(c *gin.Context) {
 	for rows.Next() {
 		var id, code, name, building, floor, roomType, status string
 		var capacity int
-		rows.Scan(&id, &code, &name, &building, &floor, &capacity, &roomType, &status)
+		if err := rows.Scan(&id, &code, &name, &building, &floor, &capacity, &roomType, &status); err != nil {
+			continue
+		}
 		list = append(list, gin.H{
 			"id": id, "room_code": code, "room_name": name, "building": building,
 			"floor": floor, "capacity": capacity, "room_type": roomType, "status": status,
@@ -620,7 +624,9 @@ func ListAllocations(c *gin.Context) {
 	var list []gin.H
 	for rows.Next() {
 		var id, subCode, subName, facCode, facName, dept, prog, sem, sec, ay, status string
-		rows.Scan(&id, &subCode, &subName, &facCode, &facName, &dept, &prog, &sem, &sec, &ay, &status)
+		if err := rows.Scan(&id, &subCode, &subName, &facCode, &facName, &dept, &prog, &sem, &sec, &ay, &status); err != nil {
+			continue
+		}
 		list = append(list, gin.H{
 			"id": id, "subject_code": subCode, "subject_name": subName,
 			"faculty_code": facCode, "faculty_name": facName,
@@ -691,7 +697,9 @@ func GetProfessorTimetable(c *gin.Context) {
 	var entries []gin.H
 	for rows.Next() {
 		var id, d, start, end, subCode, subName, facCode, room, sec, sem string
-		rows.Scan(&id, &d, &start, &end, &subCode, &subName, &facCode, &room, &sec, &sem)
+		if err := rows.Scan(&id, &d, &start, &end, &subCode, &subName, &facCode, &room, &sec, &sem); err != nil {
+			continue
+		}
 		entries = append(entries, gin.H{
 			"id": id, "day": d, "start_time": start, "end_time": end,
 			"subject_code": subCode, "subject_name": subName,
@@ -733,7 +741,9 @@ func GetProfessorSessionHistory(c *gin.Context) {
 		var start time.Time
 		var end *time.Time
 		var count int
-		rows.Scan(&id, &subject, &start, &end, &count)
+		if err := rows.Scan(&id, &subject, &start, &end, &count); err != nil {
+			continue
+		}
 		sessions = append(sessions, gin.H{
 			"id": id, "subject_code": subject, "start_time": start, "end_time": end, "attendance_count": count,
 		})
