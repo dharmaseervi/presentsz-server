@@ -42,11 +42,12 @@ func Setup(r *gin.Engine) {
 		student.GET("/students/:id", handlers.GetStudent)
 		student.GET("/students/:id/attendance", handlers.GetStudentAttendance)
 		student.GET("/classrooms/:room_name/count", handlers.GetClassroomCount)
-		student.GET("/timetable", handlers.GetTimetable)
+		// student.GET("/timetable", handlers.GetTimetable)
 		student.GET("/sessions/active", handlers.GetActiveSession)
 		student.POST("/students/change-password", handlers.ChangePassword)
 		student.GET("/sessions/:session_id/attendance-count", handlers.GetSessionAttendanceCount)
 		student.PUT("/students/request-email-update", handlers.RequestEmailUpdate)
+		student.GET("/timetable/week", handlers.GetTimetableWeek)
 
 	}
 
