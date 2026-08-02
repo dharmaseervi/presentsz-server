@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -146,13 +147,11 @@ func LoginStudent(c *gin.Context) {
 		return
 	}
 
-	// Verify password
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
 
-	// Check password expiry
 	if passwordResetRequired && passwordExpiresAt != nil && time.Now().After(*passwordExpiresAt) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":                   "password_expired",
@@ -161,28 +160,47 @@ func LoginStudent(c *gin.Context) {
 		})
 		return
 	}
+	fmt.Println("Existing BLE UUID:", existingBLEUUID)
+	fmt.Println("Incoming BLE UUID:", req.BLEUUID)
+	fmt.Println("Incoming Device ID:", req.DeviceID)
 
-	// Device binding check — password was correct, but this may not be the
-	// student's registered device.
+	if existingBLEUUID == nil || *existingBLEUUID == "" {
+		tag, err := db.Pool.Exec(
+			context.Background(),
+			`UPDATE students
+         SET ble_uuid = $1, device_id = $2
+         WHERE id = $3`,
+			req.BLEUUID,
+			req.DeviceID,
+			id,
+		)
+
+		fmt.Println("Rows affected:", tag.RowsAffected())
+
+		if err != nil {
+			fmt.Println("Update error:", err)
+		} else {
+			fmt.Println("Device bound successfully")
+
+		}
+	}
 	if req.BLEUUID != "" {
 		if existingBLEUUID == nil || *existingBLEUUID == "" {
-			// First login ever, or device was reset by admin — bind this device now.
-			db.Pool.Exec(context.Background(),
+			if _, bindErr := db.Pool.Exec(context.Background(),
 				`UPDATE students SET ble_uuid = $1, device_id = $2 WHERE id = $3`,
 				req.BLEUUID, req.DeviceID, id,
-			)
+			); bindErr != nil {
+				log.Println("Failed to bind device for student", id, ":", bindErr)
+			}
 		} else if *existingBLEUUID != req.BLEUUID {
-			// A different device is already bound to this account.
 			c.JSON(http.StatusForbidden, gin.H{
 				"error":   "device_mismatch",
 				"message": "This account is registered to another device. Contact your administrator to reset your device.",
 			})
 			return
 		}
-		// else: existingBLEUUID == req.BLEUUID — same device, proceed normally
 	}
 
-	// Get section details
 	var sectionCode, sectionLetter *string
 	if sectionID != nil {
 		db.Pool.QueryRow(context.Background(),
@@ -190,7 +208,6 @@ func LoginStudent(c *gin.Context) {
 		).Scan(&sectionCode, &sectionLetter)
 	}
 
-	// Generate token
 	token, err := middleware.GenerateToken(id, "student")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})

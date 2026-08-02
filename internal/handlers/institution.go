@@ -712,16 +712,41 @@ func GetProfessorTimetable(c *gin.Context) {
 // GET /professor/sessions/active — resume state after app restart
 func GetProfessorActiveSession(c *gin.Context) {
 	profID, _ := c.Get("user_id")
-	var id, subjectCode, roomCode string
+
+	var (
+		id, subjectCode, subjectName, roomName string
+		startTime                              time.Time
+		endTime                                *time.Time
+	)
+
 	err := db.Pool.QueryRow(context.Background(),
-		`SELECT id, subject, room_id::text FROM attendance_sessions
-		 WHERE professor_id = $1 AND active = true LIMIT 1`, profID,
-	).Scan(&id, &subjectCode, &roomCode)
+		`SELECT s.id, s.subject, COALESCE(sub.subject_name, ''), COALESCE(r.room_name, ''),
+		        s.start_time, s.end_time
+		 FROM attendance_sessions s
+		 LEFT JOIN subjects sub ON sub.subject_code = s.subject
+		 LEFT JOIN classrooms r ON r.id = s.room_id
+		 WHERE s.professor_id = $1 AND s.active = true
+		 LIMIT 1`,
+		profID,
+	).Scan(&id, &subjectCode, &subjectName, &roomName, &startTime, &endTime)
+
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"session": nil})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"session": gin.H{"id": id, "subject_code": subjectCode, "room_code": roomCode}})
+
+	session := gin.H{
+		"id":         id,
+		"subject":    subjectCode,
+		"room_name":  roomName,
+		"active":     true,
+		"start_time": startTime.Format(time.RFC3339),
+	}
+	if endTime != nil {
+		session["end_time"] = endTime.Format(time.RFC3339)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"session": session})
 }
 
 // GET /professor/sessions — this professor's session history
