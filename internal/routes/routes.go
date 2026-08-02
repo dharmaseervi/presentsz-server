@@ -47,13 +47,12 @@ func Setup(r *gin.Engine) {
 		student.POST("/students/change-password", handlers.ChangePassword)
 		student.GET("/sessions/:session_id/attendance-count", handlers.GetSessionAttendanceCount)
 		student.PUT("/students/request-email-update", handlers.RequestEmailUpdate)
-		student.GET("/timetable/week", handlers.GetTimetableWeek)
 
 	}
 
 	// PROFESSOR routes (AUTH + ROLE REQUIRED)
 	professor := r.Group("/")
-	professor.Use(middleware.AuthMiddleware(), middleware.RequireRole("professor", "admin", "hod"))
+	professor.Use(middleware.AuthMiddleware(), middleware.RequireRole("professor", "student", "admin", "hod"))
 	{
 		professor.POST("/sessions", handlers.StartSession)
 		professor.GET("/classrooms", handlers.GetClassrooms)
