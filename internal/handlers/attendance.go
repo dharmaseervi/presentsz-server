@@ -251,11 +251,11 @@ func GetSessionAttendance(c *gin.Context) {
 	sessionID := c.Param("session_id")
 
 	rows, err := db.Pool.Query(context.Background(),
-		`SELECT s.name, s.roll_number, s.department, a.status, a.marked_at::text, a.marked_by
-		 FROM attendance a
-		 JOIN students s ON s.id = a.student_id
-		 WHERE a.session_id = $1
-		 ORDER BY a.marked_at ASC`,
+		`SELECT s.name, s.roll_number, s.department, a.status, a.marked_at, a.marked_by
+     FROM attendance a
+     JOIN students s ON s.id = a.student_id
+     WHERE a.session_id = $1
+     ORDER BY a.marked_at ASC`,
 		sessionID,
 	)
 	if err != nil {
@@ -276,12 +276,13 @@ func GetSessionAttendance(c *gin.Context) {
 	var records []Record
 	for rows.Next() {
 		var r Record
-		if err := rows.Scan(&r.Name, &r.RollNumber, &r.Department, &r.Status, &r.MarkedAt, &r.MarkedBy); err != nil {
+		var markedAt time.Time
+		if err := rows.Scan(&r.Name, &r.RollNumber, &r.Department, &r.Status, &markedAt, &r.MarkedBy); err != nil {
 			continue
 		}
+		r.MarkedAt = markedAt.Format(time.RFC3339)
 		records = append(records, r)
 	}
-
 	c.JSON(http.StatusOK, gin.H{"session_id": sessionID, "count": len(records), "records": records})
 }
 
@@ -720,24 +721,22 @@ func GetEligibleStudents(c *gin.Context) {
 
 	rows, err := db.Pool.Query(context.Background(),
 		`SELECT s.id, s.name, s.roll_number, s.department,
-		        EXISTS(SELECT 1 FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id) as marked,
-		        COALESCE((SELECT a.status FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as status,
-		        COALESCE((SELECT a.marked_by FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as marked_by,
-		        (SELECT a.marked_at::text FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id) as marked_at
-		 FROM students s
-		 JOIN sections sec ON sec.id = s.section_id
-		 JOIN attendance_sessions sess ON sess.id = $1
-		 WHERE sec.section_letter = sess.section
-		   AND s.semester = sess.semester
-		 ORDER BY s.roll_number`,
+            EXISTS(SELECT 1 FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id) as marked,
+            COALESCE((SELECT a.status FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as status,
+            COALESCE((SELECT a.marked_by FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id), '') as marked_by,
+            (SELECT a.marked_at FROM attendance a WHERE a.session_id = $1 AND a.student_id = s.id) as marked_at
+     FROM students s
+     JOIN sections sec ON sec.id = s.section_id
+     JOIN attendance_sessions sess ON sess.id = $1
+     WHERE sec.section_letter = sess.section AND s.semester = sess.semester
+     ORDER BY s.roll_number`,
 		sessionID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch attendance"})
 		return
 	}
 	defer rows.Close()
-
 	type Student struct {
 		ID         string  `json:"id"`
 		Name       string  `json:"name"`
@@ -752,9 +751,14 @@ func GetEligibleStudents(c *gin.Context) {
 	var students []Student
 	for rows.Next() {
 		var s Student
-		if err := rows.Scan(&s.ID, &s.Name, &s.RollNumber, &s.Department, &s.Marked, &s.Status, &s.MarkedBy, &s.MarkedAt); err != nil {
+		var markedAt *time.Time
+		if err := rows.Scan(&s.ID, &s.Name, &s.RollNumber, &s.Department, &s.Marked, &s.Status, &s.MarkedBy, &markedAt); err != nil {
 			log.Println("GetEligibleStudents scan error:", err)
 			continue
+		}
+		if markedAt != nil {
+			formatted := markedAt.Format(time.RFC3339)
+			s.MarkedAt = &formatted
 		}
 		students = append(students, s)
 	}
